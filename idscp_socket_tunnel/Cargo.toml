@@ -1,0 +1,14 @@
+[package]
+name = "idscp_socket_tunnel"
+version = "0.1.0"
+authors = ["Oliver Braunsdorf <oliver.braunsdorf@aisec.fraunhofer.de>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+idscp_core = { path = "../idscp_core" }
+idscp_default_drivers = { path = "../idscp_default_drivers" }
+clap = "2.33.3"
+env_logger = "0.7.1"
+

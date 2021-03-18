@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "idscp_core",
+    "idscp_default_drivers",
+    "idscp_tests",
+    "idscp_examples",
+    "idscp_socket_tunnel",
+]

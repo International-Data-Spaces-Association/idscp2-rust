@@ -1,0 +1,5 @@
+signed_golden_values
+out/
+root-ca/
+intermediate_test_client/
+intermediate_test_server/

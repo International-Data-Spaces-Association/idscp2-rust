@@ -1,0 +1,6 @@
+[hooks]
+post-commit = "if [ $(git rev-parse --abbrev-ref HEAD) != feature* ]; then cargo clippy && cargo fmt -- --check; fi"
+pre-push = "if [ $(git rev-parse --abbrev-ref HEAD) != feature* ]; then cargo test --tests && cargo fmt -- --check; fi"
+
+[logging]
+verbose = true
