@@ -1,0 +1,11 @@
+[package]
+name = "idscp_default_drivers"
+version = "0.1.0"
+authors = ["Oliver Braunsdorf <oliver.braunsdorf@aisec.fraunhofer.de>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rustls = {version = "0.19.0", features = ["dangerous_configuration"]}
+webpki = "0.21.4"
