@@ -4,10 +4,7 @@ mod messages;
 
 use chunkvec::ChunkVecBuffer;
 use fsm::*;
-use messages::{
-    idscp_message_factory as msg_factory, idscpv2_messages::IdscpMessage,
-    idscpv2_messages::IdscpMessage_oneof_message,
-};
+use messages::{idscp_message_factory::{self as msg_factory, create_idscp_data}, idscpv2_messages::IdscpMessage, idscpv2_messages::IdscpMessage_oneof_message};
 use protobuf::Message;
 use std::convert::TryFrom;
 use std::io::Write;
@@ -62,8 +59,7 @@ impl IDSCPConnection {
                 Err(FsmError::UnknownTransition)  //ignore unexpected messages
                 | Ok(()) => Ok(n),
 
-                Err(FsmError::WouldBlock)
-                | Err(FsmError::NotConnected)=> Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"))
+                Err(FsmError::NotConnected)=> Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"))
             }
         } else {
             Err(std::io::Error::new(
@@ -116,6 +112,36 @@ impl IDSCPConnection {
     pub fn is_connected(&self) -> bool {
         self.fsm.is_connected()
     }
+
+    pub fn send(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let msg: IdscpMessage = create_idscp_data(vec![]); // create empty package to determine size overhead of protobuf encapsulation
+        let header_size = msg.compute_size();
+        let buffer_space: usize = 42; // this is a fictive number, because we currently have an unbounded buffer that has no limits
+        let payload_space = buffer_space.saturating_sub(usize::try_from(header_size).unwrap());
+        let n = std::cmp::min(payload_space, data.len());
+
+        let copy = data[..n].to_vec(); //TODO: only copy the data if IDSCP_DATA message is constructed
+        
+        
+        match self.fsm.process_event(FsmEvent::FromUpper(UserEvent::Data(copy))) {
+            Ok(Some(action)) => {
+                self.do_action(action);
+                Ok(buffer_space)
+            },
+
+            Ok(None) => {
+                Ok(buffer_space)
+            },
+
+            Err(FsmError::UnknownTransition) => {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "unknown transition"))
+            }
+
+            Err(FsmError::NotConnected)=> {
+                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -148,6 +174,7 @@ mod tests {
                     }
                 }
             }
+            channel1_2.clear();
 
             while peer2.wants_write() {
                 peer2.write(&mut channel2_1).unwrap();
@@ -164,9 +191,13 @@ mod tests {
                     }
                 }
             }
+            channel2_1.clear();
         }
 
-        assert!(peer1.is_connected());
-        assert!(peer2.is_connected());
+        assert!(peer1.is_connected() && channel1_2.is_empty());
+        assert!(peer2.is_connected() && channel1_2.is_empty());
+
+        let n = peer1.send(b"hello world").unwrap();
+        assert!(n > 0 && peer1.wants_write())
     }
 }

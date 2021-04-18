@@ -2,6 +2,7 @@ use thiserror::Error;
 
 pub(crate) enum FsmAction {
     SecureChannelAction(SecureChannelEvent),
+    NotifyUserData(Vec<u8>)
 }
 // FSM Events
 #[derive(Debug, Clone)]
@@ -44,8 +45,6 @@ pub(crate) struct FSM {
 pub enum FsmError {
     #[error("No transition available for the given event")]
     UnknownTransition,
-    #[error("FSM is locked forever")]
-    WouldBlock,
     #[error(
         "Action failed because FSM was started but is currently not connected. Try it later again"
     )]
@@ -104,6 +103,7 @@ impl FSM {
                     self.current_state = FsmState::Established;
                     Ok(None)
                 }
+                
 
                 _ => {
                     log::warn!(
@@ -115,6 +115,26 @@ impl FSM {
                 }
             },
 
+            FsmState::Established => match event {
+                FsmEvent::FromUpper(UserEvent::Data(data)) => {
+                    log::debug!("sending payload data to peer: {:?}", data);
+                    Ok(Some(FsmAction::SecureChannelAction(SecureChannelEvent::Data(data))))
+                }
+
+                /*FsmEvent::FromSecureChannel(SecureChannelEvent::Data(data)) => {
+                    log::debug!("receiving idscp_message from peer: {:?}", data);
+                    Ok(Some(FsmAction::NotifyUserData(data)))
+                }*/
+
+                _ => {
+                    log::warn!(
+                        "unimplemented transition for {:?} <- {:?}",
+                        &self.current_state,
+                        event
+                    );
+                    unimplemented!();
+                }
+            }
             _ => {
                 log::warn!(
                     "unimplemented transition for {:?} <- {:?}",
