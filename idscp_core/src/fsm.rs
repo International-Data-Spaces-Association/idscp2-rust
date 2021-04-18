@@ -50,8 +50,6 @@ pub enum FsmError {
         "Action failed because FSM was started but is currently not connected. Try it later again"
     )]
     NotConnected,
-    #[error("IdscpData must be buffered in state 'WaitForAck'")]
-    IdscpDataNotCached,
 }
 
 impl FSM {
@@ -60,6 +58,10 @@ impl FSM {
             current_state: FsmState::Closed,
             name: config,
         }
+    }
+
+    pub(crate) fn is_connected(&self) -> bool {
+        self.current_state == FsmState::Established
     }
 
     pub(crate) fn process_event(&mut self, event: FsmEvent) -> Result<Option<FsmAction>, FsmError> {
@@ -87,12 +89,40 @@ impl FSM {
                 }
 
                 _ => {
-                    log::debug!("unexpected event");
-                    Ok(None)
+                    log::warn!(
+                        "unimplemented transition for {:?} <- {:?}",
+                        &self.current_state,
+                        event
+                    );
+                    unimplemented!();
                 }
             },
 
-            _ => unimplemented!(),
+            FsmState::WaitForHello => match event {
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Hello(peername)) => {
+                    log::debug!("received hello from {}", peername);
+                    self.current_state = FsmState::Established;
+                    Ok(None)
+                }
+
+                _ => {
+                    log::warn!(
+                        "unimplemented transition for {:?} <- {:?}",
+                        &self.current_state,
+                        event
+                    );
+                    unimplemented!();
+                }
+            },
+
+            _ => {
+                log::warn!(
+                    "unimplemented transition for {:?} <- {:?}",
+                    &self.current_state,
+                    event
+                );
+                unimplemented!();
+            }
         }
     }
 }
