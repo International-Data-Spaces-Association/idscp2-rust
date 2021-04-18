@@ -1,0 +1,85 @@
+// Copyright (c) 2020, Fraunhofer AISEC. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+//IDSCP message frame
+message IdscpMessage {
+    // One of the following will be filled in.
+    oneof message {
+        IdscpHello idscpHello = 1;
+        IdscpClose idscpClose = 2;
+        IdscpDatExpired idscpDatExpired = 3;
+        IdscpDat idscpDat = 4;
+        IdscpReRat idscpReRat = 5;
+        IdscpRatProver idscpRatProver = 6;
+        IdscpRatVerifier idscpRatVerifier = 7;
+        IdscpData idscpData = 8;
+        IdscpAck idscpAck = 9;
+    }
+}
+
+
+//IDSCP messages
+message IdscpHello {
+    int32 version = 1;                      //IDSCP protocol version
+    IdscpDat dynamicAttributeToken = 2;     //initial dynamicAttributeToken
+    repeated string supportedRatSuite = 3;  //RemoteAttestationCipher prover
+    repeated string expectedRatSuite = 4;   //RemoteAttestationCipher verifier
+}
+
+message IdscpClose {
+
+    enum CloseCause {
+        USER_SHUTDOWN = 0;
+        TIMEOUT = 1;
+        ERROR = 2;
+        NO_VALID_DAT = 3;
+        NO_RAT_MECHANISM_MATCH_PROVER = 4;
+        NO_RAT_MECHANISM_MATCH_VERIFIER = 5;
+        RAT_PROVER_FAILED = 6;
+        RAT_VERIFIER_FAILED = 7;
+    }
+
+    CloseCause cause_code = 1;
+    string cause_msg = 2;
+}
+
+message IdscpDatExpired {           //request new dynamicAttributeToken
+}
+
+message IdscpDat {
+    bytes token = 1;
+}
+
+message IdscpReRat {                //request new remoteAttestation
+    string cause = 1;               //optional
+}
+
+message IdscpRatProver {
+    bytes data = 1;
+}
+
+message IdscpRatVerifier {
+    bytes data = 1;
+}
+
+message IdscpData {
+    bytes data = 1;
+    bool alternating_bit = 2;
+}
+
+message IdscpAck {
+    bool alternating_bit = 1;
+}

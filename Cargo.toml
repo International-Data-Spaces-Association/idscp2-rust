@@ -1,4 +1,5 @@
 [workspace]
 members = [
     "idscp_default_drivers",
+    "idscp_core",
 ]

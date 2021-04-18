@@ -11,11 +11,9 @@ impl RustlsSecureChannelServer {
     pub fn new() -> RustlsSecureChannelServer {
         let config = ServerConfig::new(NoClientAuth::new()); // TODO: DANGER: No client auth!
         let session = ServerSession::new(&Arc::new(config));
-        RustlsSecureChannelServer {session}
+        RustlsSecureChannelServer { session }
     }
 }
-
-
 
 mod tests {
     use super::*;
