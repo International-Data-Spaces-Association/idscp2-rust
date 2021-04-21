@@ -1,13 +1,19 @@
 mod chunkvec;
 mod fsm;
 mod messages;
+mod tokio_idscp_connection;
 
 use chunkvec::ChunkVecBuffer;
 use fsm::*;
-use messages::{idscp_message_factory::{self as msg_factory, create_idscp_data}, idscpv2_messages::IdscpMessage, idscpv2_messages::IdscpMessage_oneof_message};
+use futures::AsyncWrite;
+use messages::{
+    idscp_message_factory::{self as msg_factory, create_idscp_data},
+    idscpv2_messages::IdscpMessage,
+    idscpv2_messages::IdscpMessage_oneof_message,
+};
 use protobuf::Message;
-use std::convert::TryFrom;
 use std::io::Write;
+use std::{convert::TryFrom, task::Poll};
 
 pub struct IDSCPConnection {
     fsm: FSM,
@@ -47,8 +53,8 @@ impl IDSCPConnection {
         !self.send_buffer_queue.is_empty()
     }
 
-    pub fn write(&mut self, out: &mut dyn Write) -> std::io::Result<usize> {
-        self.send_buffer_queue.write_to(out)
+    pub fn write(&mut self, mut out: &mut [u8]) -> std::io::Result<usize> {
+        self.send_buffer_queue.write_to(&mut out)
     }
 
     pub fn read(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -121,25 +127,27 @@ impl IDSCPConnection {
         let n = std::cmp::min(payload_space, data.len());
 
         let copy = data[..n].to_vec(); //TODO: only copy the data if IDSCP_DATA message is constructed
-        
-        
-        match self.fsm.process_event(FsmEvent::FromUpper(UserEvent::Data(copy))) {
+
+        match self
+            .fsm
+            .process_event(FsmEvent::FromUpper(UserEvent::Data(copy)))
+        {
             Ok(Some(action)) => {
                 self.do_action(action);
                 Ok(buffer_space)
-            },
-
-            Ok(None) => {
-                Ok(buffer_space)
-            },
-
-            Err(FsmError::UnknownTransition) => {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "unknown transition"))
             }
 
-            Err(FsmError::NotConnected)=> {
-                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"))
-            }
+            Ok(None) => Ok(buffer_space),
+
+            Err(FsmError::UnknownTransition) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "unknown transition",
+            )),
+
+            Err(FsmError::NotConnected) => Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "would block",
+            )),
         }
     }
 }

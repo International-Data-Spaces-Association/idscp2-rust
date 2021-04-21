@@ -2,7 +2,7 @@ use thiserror::Error;
 
 pub(crate) enum FsmAction {
     SecureChannelAction(SecureChannelEvent),
-    NotifyUserData(Vec<u8>)
+    NotifyUserData(Vec<u8>),
 }
 // FSM Events
 #[derive(Debug, Clone)]
@@ -103,7 +103,6 @@ impl FSM {
                     self.current_state = FsmState::Established;
                     Ok(None)
                 }
-                
 
                 _ => {
                     log::warn!(
@@ -118,14 +117,15 @@ impl FSM {
             FsmState::Established => match event {
                 FsmEvent::FromUpper(UserEvent::Data(data)) => {
                     log::debug!("sending payload data to peer: {:?}", data);
-                    Ok(Some(FsmAction::SecureChannelAction(SecureChannelEvent::Data(data))))
+                    Ok(Some(FsmAction::SecureChannelAction(
+                        SecureChannelEvent::Data(data),
+                    )))
                 }
 
                 /*FsmEvent::FromSecureChannel(SecureChannelEvent::Data(data)) => {
                     log::debug!("receiving idscp_message from peer: {:?}", data);
                     Ok(Some(FsmAction::NotifyUserData(data)))
                 }*/
-
                 _ => {
                     log::warn!(
                         "unimplemented transition for {:?} <- {:?}",
@@ -134,7 +134,7 @@ impl FSM {
                     );
                     unimplemented!();
                 }
-            }
+            },
             _ => {
                 log::warn!(
                     "unimplemented transition for {:?} <- {:?}",
