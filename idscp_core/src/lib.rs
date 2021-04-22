@@ -1,31 +1,29 @@
 mod chunkvec;
 mod fsm;
 mod messages;
-mod tokio_idscp_connection;
+pub mod tokio_idscp_connection;
 
-use byteorder::{BigEndian, ByteOrder};
+use byteorder::ByteOrder;
 use chunkvec::ChunkVecBuffer;
 use fsm::*;
-use futures::AsyncWrite;
 use messages::{
     idscp_message_factory::{self as msg_factory, create_idscp_data},
     idscpv2_messages::IdscpMessage,
     idscpv2_messages::IdscpMessage_oneof_message,
 };
 use protobuf::Message;
-use std::{convert::TryFrom, task::Poll};
-use std::{io::Write, mem::size_of};
-use tokio::io::AsyncReadExt;
+use std::convert::TryFrom;
+use std::io::Write;
 
 type LengthPrefix = u32;
 const LENGTH_PREFIX_SIZE: usize = std::mem::size_of::<LengthPrefix>();
 
-pub struct IDSCPConnection {
-    fsm: FSM,
+pub struct IdscpConnection {
+    fsm: Fsm,
     send_buffer_queue: ChunkVecBuffer,
 }
 
-impl IDSCPConnection {
+impl IdscpConnection {
     fn push_to_send_buffer(&mut self, msg: IdscpMessage) {
         //TODO: optimize this to not create the "raw" buffer but to write directly to the end of the send_buffer?
 
@@ -34,8 +32,6 @@ impl IDSCPConnection {
         msg_length_be.extend_from_slice(&msg_length_32bit.to_be_bytes());
         self.send_buffer_queue.append(msg_length_be);
 
-        let msg_length =
-            usize::try_from(msg_length_32bit).expect("msg_length does not fit into usize?");
         let mut raw = Vec::new();
         msg.write_to_vec(&mut raw).unwrap();
         self.send_buffer_queue.append(raw);
@@ -117,14 +113,14 @@ impl IDSCPConnection {
         Ok(())
     }
 
-    pub fn connect(config: String) -> IDSCPConnection {
-        let mut fsm = FSM::new(config);
+    pub fn connect(config: String) -> IdscpConnection {
+        let mut fsm = Fsm::new(config);
         let action = fsm
             .process_event(FsmEvent::FromUpper(UserEvent::StartHandshake))
             .unwrap()
             .expect("wrong fsm implementation?");
-        let mut conn = IDSCPConnection {
-            fsm: fsm,
+        let mut conn = IdscpConnection {
+            fsm,
             send_buffer_queue: ChunkVecBuffer::new(),
         };
         conn.do_action(action);
@@ -132,10 +128,10 @@ impl IDSCPConnection {
         conn
     }
 
-    pub fn accept(config: String) -> IDSCPConnection {
-        let mut fsm = FSM::new(config);
-        IDSCPConnection {
-            fsm: fsm,
+    pub fn accept(config: String) -> IdscpConnection {
+        let fsm = Fsm::new(config);
+        IdscpConnection {
+            fsm,
             send_buffer_queue: ChunkVecBuffer::new(),
         }
     }
@@ -184,8 +180,8 @@ mod tests {
     #[test]
     fn establish_connection() {
         let _ = env_logger::builder().is_test(true).try_init();
-        let mut peer1 = IDSCPConnection::connect("peer1".into());
-        let mut peer2 = IDSCPConnection::accept("peer2".into());
+        let mut peer1 = IdscpConnection::connect("peer1".into());
+        let mut peer2 = IdscpConnection::accept("peer2".into());
 
         const MTU: usize = 1500; // Maximum Transmission Unit
         let mut channel1_2 = Vec::with_capacity(MTU);

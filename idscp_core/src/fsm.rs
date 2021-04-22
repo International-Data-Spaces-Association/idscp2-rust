@@ -2,7 +2,7 @@ use thiserror::Error;
 
 pub(crate) enum FsmAction {
     SecureChannelAction(SecureChannelEvent),
-    NotifyUserData(Vec<u8>),
+    // NotifyUserData(Vec<u8>),
 }
 // FSM Events
 #[derive(Debug, Clone)]
@@ -16,7 +16,7 @@ pub(crate) enum FsmEvent {
 
 #[derive(Debug, Clone)]
 pub(crate) enum SecureChannelEvent {
-    Close,
+    // Close,
     Hello(String),
     Data(Vec<u8>),
 }
@@ -24,7 +24,7 @@ pub(crate) enum SecureChannelEvent {
 #[derive(Debug, Clone)]
 pub(crate) enum UserEvent {
     StartHandshake,
-    Stop,
+    // Stop,
     Data(Vec<u8>),
 }
 
@@ -36,7 +36,7 @@ enum FsmState {
     Established,  //nothing active
 }
 
-pub(crate) struct FSM {
+pub(crate) struct Fsm {
     current_state: FsmState,
     name: String,
 }
@@ -51,9 +51,9 @@ pub enum FsmError {
     NotConnected,
 }
 
-impl FSM {
-    pub(crate) fn new(config: String) -> FSM {
-        FSM {
+impl Fsm {
+    pub(crate) fn new(config: String) -> Fsm {
+        Fsm {
             current_state: FsmState::Closed,
             name: config,
         }
@@ -135,6 +135,7 @@ impl FSM {
                     unimplemented!();
                 }
             },
+
             _ => {
                 log::warn!(
                     "unimplemented transition for {:?} <- {:?}",

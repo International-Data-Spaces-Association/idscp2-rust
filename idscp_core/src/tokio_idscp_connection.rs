@@ -1,22 +1,19 @@
-use super::IDSCPConnection;
+use super::IdscpConnection;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::tcp,
-};
 
-struct AsyncIdscpListener {
+pub struct AsyncIdscpListener {
     tcp_listener: TcpListener,
 }
 impl AsyncIdscpListener {
-    async fn bind(addr: &'static str) -> std::io::Result<AsyncIdscpListener> {
-        let tcp_listener = TcpListener::bind("127.0.0.1:8080").await?;
+    pub async fn bind(addr: &'static str) -> std::io::Result<AsyncIdscpListener> {
+        let tcp_listener = TcpListener::bind(addr).await?;
         Ok(AsyncIdscpListener { tcp_listener })
     }
 
-    async fn accept(&self) -> std::io::Result<AsyncIdscpConnection> {
+    pub async fn accept(&self) -> std::io::Result<AsyncIdscpConnection> {
         let (mut tcp_stream, _) = self.tcp_listener.accept().await.unwrap();
-        let mut connection = IDSCPConnection::accept(String::from("acceptor"));
+        let mut connection = IdscpConnection::accept(String::from("acceptor"));
         AsyncIdscpConnection::start_handshake(&mut connection, &mut tcp_stream).await?;
 
         Ok(AsyncIdscpConnection {
@@ -26,14 +23,14 @@ impl AsyncIdscpListener {
     }
 }
 
-struct AsyncIdscpConnection {
+pub struct AsyncIdscpConnection {
     tcp_stream: TcpStream,
-    connection: IDSCPConnection,
+    connection: IdscpConnection,
 }
 impl AsyncIdscpConnection {
     pub async fn connect(addr: &'static str) -> std::io::Result<AsyncIdscpConnection> {
         let mut tcp_stream = TcpStream::connect(addr).await?;
-        let mut connection = IDSCPConnection::connect("connector".to_string());
+        let mut connection = IdscpConnection::connect("connector".to_string());
 
         Self::start_handshake(&mut connection, &mut tcp_stream).await?;
 
@@ -44,7 +41,7 @@ impl AsyncIdscpConnection {
     }
 
     async fn start_handshake(
-        connection: &mut IDSCPConnection,
+        connection: &mut IdscpConnection,
         stream: &mut TcpStream,
     ) -> std::io::Result<()> {
         let (mut reader, mut writer) = stream.split();
@@ -63,7 +60,7 @@ impl AsyncIdscpConnection {
     }
 
     async fn read<'a>(
-        connection: &mut IDSCPConnection,
+        connection: &mut IdscpConnection,
         reader: &mut tokio::net::tcp::ReadHalf<'a>,
     ) -> std::io::Result<usize> {
         let mut buf = [0u8; 1024];
@@ -72,7 +69,7 @@ impl AsyncIdscpConnection {
     }
 
     async fn write<'a>(
-        connection: &mut IDSCPConnection,
+        connection: &mut IdscpConnection,
         writer: &mut tokio::net::tcp::WriteHalf<'a>,
     ) -> std::io::Result<()> {
         let mut buf = Vec::new(); // TODO: use a statically sized array here?
