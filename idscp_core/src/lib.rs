@@ -3,6 +3,7 @@ mod fsm;
 mod messages;
 mod tokio_idscp_connection;
 
+use byteorder::{BigEndian, ByteOrder};
 use chunkvec::ChunkVecBuffer;
 use fsm::*;
 use futures::AsyncWrite;
@@ -12,8 +13,12 @@ use messages::{
     idscpv2_messages::IdscpMessage_oneof_message,
 };
 use protobuf::Message;
-use std::io::Write;
 use std::{convert::TryFrom, task::Poll};
+use std::{io::Write, mem::size_of};
+use tokio::io::AsyncReadExt;
+
+type LengthPrefix = u32;
+const LENGTH_PREFIX_SIZE: usize = std::mem::size_of::<LengthPrefix>();
 
 pub struct IDSCPConnection {
     fsm: FSM,
@@ -22,8 +27,15 @@ pub struct IDSCPConnection {
 
 impl IDSCPConnection {
     fn push_to_send_buffer(&mut self, msg: IdscpMessage) {
-        //TODO: optimize this to not create the "raw" buffer but to write directly to the end of the send_buffer
+        //TODO: optimize this to not create the "raw" buffer but to write directly to the end of the send_buffer?
 
+        let msg_length_32bit = msg.compute_size();
+        let mut msg_length_be = Vec::with_capacity(4);
+        msg_length_be.extend_from_slice(&msg_length_32bit.to_be_bytes());
+        self.send_buffer_queue.append(msg_length_be);
+
+        let msg_length =
+            usize::try_from(msg_length_32bit).expect("msg_length does not fit into usize?");
         let mut raw = Vec::new();
         msg.write_to_vec(&mut raw).unwrap();
         self.send_buffer_queue.append(raw);
@@ -53,17 +65,30 @@ impl IDSCPConnection {
         !self.send_buffer_queue.is_empty()
     }
 
-    pub fn write(&mut self, mut out: &mut [u8]) -> std::io::Result<usize> {
-        self.send_buffer_queue.write_to(&mut out)
+    pub fn write(&mut self, out: &mut dyn Write) -> std::io::Result<usize> {
+        self.send_buffer_queue.write_to(out)
     }
 
-    pub fn read(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if let Ok(msg) = IdscpMessage::parse_from_bytes(buf) {
+    pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let msg_length: LengthPrefix = if buf.len() >= LENGTH_PREFIX_SIZE {
+            byteorder::BigEndian::read_u32(&buf[..LENGTH_PREFIX_SIZE])
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "not enough bytes available to read length prefix",
+            ));
+        };
+
+        let range_begin = LENGTH_PREFIX_SIZE;
+        let range_end = std::cmp::min(LENGTH_PREFIX_SIZE + (msg_length as usize), buf.len());
+
+        if let Ok(msg) = IdscpMessage::parse_from_bytes(&buf[range_begin..range_end]) {
             let m = msg.compute_size();
-            let n = usize::try_from(m).unwrap();
+            assert!(m == msg_length);
+            let msg_length = usize::try_from(m).unwrap();
             match self.process_new_msg(msg) {
                 Err(FsmError::UnknownTransition)  //ignore unexpected messages
-                | Ok(()) => Ok(n),
+                | Ok(()) => Ok(LENGTH_PREFIX_SIZE + msg_length),
 
                 Err(FsmError::NotConnected)=> Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"))
             }
@@ -134,10 +159,10 @@ impl IDSCPConnection {
         {
             Ok(Some(action)) => {
                 self.do_action(action);
-                Ok(buffer_space)
+                Ok(n)
             }
 
-            Ok(None) => Ok(buffer_space),
+            Ok(None) => Ok(n),
 
             Err(FsmError::UnknownTransition) => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -206,6 +231,6 @@ mod tests {
         assert!(peer2.is_connected() && channel1_2.is_empty());
 
         let n = peer1.send(b"hello world").unwrap();
-        assert!(n > 0 && peer1.wants_write())
+        assert!(n == 11 && peer1.wants_write())
     }
 }
