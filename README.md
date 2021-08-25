@@ -22,7 +22,7 @@ Install the latest stable release of the rust toolchain (it is recommended to in
 
 Install Linux dependencies
 ```
-apt install libssl-dev protobuf-compiler 
+apt install libssl-dev protobuf-compiler cargo
 ```
 
 In the root directory run
