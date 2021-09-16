@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Install macOS Dependencies
-        run: sudo brew update && sudo brew install protobuf && protoc --version
+        run: brew update && brew install protobuf && protoc --version
       - name: Build
         run: cargo build --verbose
       - name: Run tests
@@ -80,7 +80,7 @@ jobs:
           toolchain: nightly
           override: true
       - name: Install macOS Dependencies
-        run: sudo brew update && sudo brew install protobuf && protoc --version
+        run: brew update && brew install protobuf && protoc --version
       - name: Build
         run: cargo build --verbose
       - name: Run tests

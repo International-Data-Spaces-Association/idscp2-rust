@@ -9,10 +9,7 @@
     <cargoProject FILE="$PROJECT_DIR$/Cargo.toml" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="ef5181f5-015c-4f3e-8355-5e02675fffc3" name="Default Changelist" comment="">
-      <change beforePath="$PROJECT_DIR$/.github/workflows/rust.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.github/workflows/rust.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-    </list>
+    <list default="true" id="ef5181f5-015c-4f3e-8355-5e02675fffc3" name="Default Changelist" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -100,7 +97,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1631780897639</updated>
-      <workItem from="1631780901701" duration="6554000" />
+      <workItem from="1631780901701" duration="6927000" />
     </task>
     <servers />
   </component>
