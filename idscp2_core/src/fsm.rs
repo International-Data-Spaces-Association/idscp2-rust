@@ -135,15 +135,6 @@ impl Fsm {
                     unimplemented!();
                 }
             },
-
-            _ => {
-                log::warn!(
-                    "unimplemented transition for {:?} <- {:?}",
-                    &self.current_state,
-                    event
-                );
-                unimplemented!();
-            }
         }
     }
 }

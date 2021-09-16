@@ -19,6 +19,7 @@ use std::io::Read;
 /// of byte vectors.  This avoids extra copies when
 /// appending a new byte vector, at the expense of
 /// more complexity when reading out.
+#[allow(dead_code)]
 pub struct ChunkVecBuffer {
     chunks: VecDeque<Vec<u8>>,
     limit: usize,
@@ -39,6 +40,7 @@ impl ChunkVecBuffer {
     /// data is not an error.
     ///
     /// A zero limit is interpreted as no limit.
+    #[allow(dead_code)]
     pub fn set_limit(&mut self, new_limit: usize) {
         self.limit = new_limit;
     }
@@ -49,6 +51,7 @@ impl ChunkVecBuffer {
     }
 
     /// How many bytes we're storing
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         let mut len = 0;
         for ch in &self.chunks {
@@ -60,6 +63,7 @@ impl ChunkVecBuffer {
     /// For a proposed append of `len` bytes, how many
     /// bytes should we actually append to adhere to the
     /// currently set `limit`?
+    #[allow(dead_code)]
     pub fn apply_limit(&self, len: usize) -> usize {
         if self.limit == 0 {
             len
@@ -71,6 +75,7 @@ impl ChunkVecBuffer {
 
     /// Append a copy of `bytes`, perhaps a prefix if
     /// we're near the limit.
+    #[allow(dead_code)]
     pub fn append_limited_copy(&mut self, bytes: &[u8]) -> usize {
         let take = self.apply_limit(bytes.len());
         self.append(bytes[..take].to_vec());
@@ -90,12 +95,14 @@ impl ChunkVecBuffer {
 
     /// Take one of the chunks from this object.  This
     /// function panics if the object `is_empty`.
+    #[allow(dead_code)]
     pub fn pop(&mut self) -> Option<Vec<u8>> {
         self.chunks.pop_front()
     }
 
     /// Read data out of this object, writing it into `buf`
     /// and returning how many bytes were written there.
+    #[allow(dead_code)]
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut offs = 0;
 
@@ -128,7 +135,7 @@ impl ChunkVecBuffer {
 
         let mut bufs = [io::IoSlice::new(&[]); 64];
         for (iov, chunk) in bufs.iter_mut().zip(self.chunks.iter()) {
-            *iov = io::IoSlice::new(&chunk);
+            *iov = io::IoSlice::new(chunk);
         }
         let len = cmp::min(bufs.len(), self.chunks.len());
         let used = wr.write_vectored(&bufs[..len])?;

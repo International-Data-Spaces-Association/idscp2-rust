@@ -3,18 +3,20 @@ use rustls::ServerConfig;
 use rustls::ServerSession;
 use std::sync::Arc;
 
+#[allow(dead_code)]
 struct RustlsSecureChannelServer {
     session: ServerSession,
 }
 
 impl RustlsSecureChannelServer {
-    pub fn new() -> RustlsSecureChannelServer {
+    pub fn _new() -> RustlsSecureChannelServer {
         let config = ServerConfig::new(NoClientAuth::new()); // TODO: DANGER: No client auth!
         let session = ServerSession::new(&Arc::new(config));
         RustlsSecureChannelServer { session }
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use rustls::Session;

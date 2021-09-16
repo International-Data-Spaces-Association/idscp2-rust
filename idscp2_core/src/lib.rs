@@ -39,7 +39,7 @@ impl IdscpConnection {
 
     fn do_action(&mut self, action: FsmAction) {
         match action {
-            FsmAction::SecureChannelAction(SecureChannelEvent::Hello(name)) => {
+            FsmAction::SecureChannelAction(SecureChannelEvent::Hello(_name)) => {
                 let msg = msg_factory::create_idscp_hello(
                     vec![],
                     &["hello".to_string()],
@@ -52,8 +52,6 @@ impl IdscpConnection {
                 let msg = msg_factory::create_idscp_data(data);
                 self.push_to_send_buffer(msg)
             }
-
-            _ => unimplemented!(),
         }
     }
 
@@ -100,7 +98,7 @@ impl IdscpConnection {
         let event = match msg.message {
             None => panic!(),
 
-            Some(IdscpMessage_oneof_message::idscpHello(idscp_hello)) => {
+            Some(IdscpMessage_oneof_message::idscpHello(_idscp_hello)) => {
                 FsmEvent::FromSecureChannel(SecureChannelEvent::Hello("bla".to_string()))
             }
 

@@ -59,18 +59,18 @@ impl AsyncIdscpConnection {
         Ok::<(), std::io::Error>(())
     }
 
-    async fn read<'a>(
+    async fn read(
         connection: &mut IdscpConnection,
-        reader: &mut tokio::net::tcp::ReadHalf<'a>,
+        reader: &mut tokio::net::tcp::ReadHalf<'_>,
     ) -> std::io::Result<usize> {
         let mut buf = [0u8; 1024];
         let n = reader.read(&mut buf[..]).await?;
         connection.read(&mut buf[..n])
     }
 
-    async fn write<'a>(
+    async fn write(
         connection: &mut IdscpConnection,
-        writer: &mut tokio::net::tcp::WriteHalf<'a>,
+        writer: &mut tokio::net::tcp::WriteHalf<'_>,
     ) -> std::io::Result<()> {
         let mut buf = Vec::new(); // TODO: use a statically sized array here?
         let _n = connection.write(&mut buf)?;
@@ -92,7 +92,6 @@ impl AsyncIdscpConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::{TcpListener, TcpStream};
 
     #[test]
     fn async_establish_connection() {
