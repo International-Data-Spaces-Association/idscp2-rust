@@ -15,7 +15,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Install Linux Dependencies
-      run: apt-get update -yq && apt-get install -y protobuf-compiler && protoc --version
+      run: sudo apt-get update -yq && sudo apt-get install -y protobuf-compiler && protoc --version
     - name: Build
       run: cargo build --verbose
     - name: Run tests

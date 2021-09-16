@@ -10,28 +10,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="ef5181f5-015c-4f3e-8355-5e02675fffc3" name="Default Changelist" comment="">
-      <change afterPath="$PROJECT_DIR$/idscp2_tests/Cargo.toml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/idscp2_tests/tests/integration.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.github/workflows/rust.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.github/workflows/rust.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/build.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/build.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/examples/client/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/examples/client/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/examples/client/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/examples/client/src/main.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/examples/server/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/examples/server/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/examples/server/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/examples/server/src/main.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/src/chunkvec.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/src/chunkvec.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/src/fsm.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/src/fsm.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/src/lib.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/src/messages/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/src/messages/.gitignore" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/src/messages/idscp_message_factory.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/src/messages/idscp_message_factory.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/src/messages/idscpv2_messages.proto" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/src/messages/idscpv2_messages.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/src/messages/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/src/messages/mod.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_core/src/tokio_idscp_connection.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_core/src/tokio_idscp_connection.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_default_drivers/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_default_drivers/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_default_drivers/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_default_drivers/src/lib.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/idscp_default_drivers/src/rustls_channel/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/idscp2_default_drivers/src/rustls_channel/mod.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -112,7 +91,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1631780897639</updated>
-      <workItem from="1631780901701" duration="4256000" />
+      <workItem from="1631780901701" duration="4596000" />
     </task>
     <servers />
   </component>
