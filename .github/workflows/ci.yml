@@ -2,9 +2,11 @@ name: Rust
 
 on:
   push:
-    branches: [ master, develop ]
+    branches: [ master ]
   pull_request:
-    branches: [ master, develop ]
+    branches: [ master ]
+  schedule:
+    - cron: '0 0 1 * *' # trigger monthly
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,7 +18,11 @@ jobs:
       matrix:
         # Run on latest ubuntu and macos using latest stable and nightly toolchain
         os: [ubuntu-latest, macos-latest]
-        rust: [stable, nightly]
+        rust:
+          - stable
+          - nightly
+          - beta
+          - 1.49.0 # Minimum supported rust version
     steps:
       - uses: actions/checkout@v2
 
