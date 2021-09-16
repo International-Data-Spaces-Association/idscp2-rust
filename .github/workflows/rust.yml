@@ -27,7 +27,6 @@ jobs:
         run: cargo build --verbose
       - name: Format and Clippy
         run: cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings
-        continue-on-error: true
 
   # Check build and tests on latest ubuntu using stable rust
   rust-stable-ubuntu:
@@ -41,7 +40,7 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
-    # Check build and tests on latest ubuntu using nightly rust
+  # Check build and tests on latest ubuntu using nightly rust
   rust-nightly-ubuntu:
     runs-on: ubuntu-latest
     steps:
@@ -50,8 +49,38 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           toolchain: nightly
+          override: true
       - name: Install Linux Dependencies
         run: sudo apt-get update -yq && sudo apt-get install -y protobuf-compiler && protoc --version
+      - name: Build
+        run: cargo build --verbose
+      - name: Run tests
+        run: cargo test --verbose
+
+  # Check build and tests on latest macOS using stable rust
+  rust-stable-macOS:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install macOS Dependencies
+        run: sudo brew update && sudo brew install protobuf && protoc --version
+      - name: Build
+        run: cargo build --verbose
+      - name: Run tests
+        run: cargo test --verbose
+
+  # Check build and tests on latest macOS using nightly rust
+  rust-nightly-macOS:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust Nightly Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - name: Install macOS Dependencies
+        run: sudo brew update && sudo brew install protobuf && protoc --version
       - name: Build
         run: cargo build --verbose
       - name: Run tests
