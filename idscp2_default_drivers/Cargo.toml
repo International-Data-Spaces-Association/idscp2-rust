@@ -1,7 +1,10 @@
 [package]
-name = "idscp_default_drivers"
+name = "idscp2_default_drivers"
 version = "0.1.0"
-authors = ["Oliver Braunsdorf <oliver.braunsdorf@aisec.fraunhofer.de>"]
+authors = [
+    "Oliver Braunsdorf <oliver.braunsdorf@aisec.fraunhofer.de>",
+    "Leon Beckmann <oliver.braunsdorf@aisec.fraunhofer.de>",
+]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
