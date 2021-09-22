@@ -1,6 +1,6 @@
 The IDSCP2 Rust implementation
 ================================
-
+ 
 ![CI pipeline status](https://github.com/International-Data-Spaces-Association/idscp2-rust/actions/workflows/ci.yml/badge.svg)
 
 The Rust implementation of the IDSCP2 transport layer.  
