@@ -12,5 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod idscp_message_factory;
 pub(crate) mod idscp2_messages;
+pub(crate) mod idscp_message_factory;

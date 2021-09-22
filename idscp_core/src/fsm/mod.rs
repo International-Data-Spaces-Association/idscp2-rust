@@ -22,8 +22,8 @@ use crate::api::idscp_connection::InnerIdscp2connection;
 use crate::drivers::daps_driver::DapsDriver;
 use crate::drivers::ra_driver::{RaIcm, RaMessage, RaRegistry};
 use crate::drivers::secure_channel::SecureChannel;
-use crate::messages::idscp_message_factory;
 use crate::messages::idscp2_messages::*;
+use crate::messages::idscp_message_factory;
 use fsm_timer::*;
 
 use crate::fsm::ra_interface::RaError;
@@ -91,11 +91,11 @@ enum ClosedStateStatus {
 enum FsmState {
     Closed(ClosedStateStatus), //nothing active
     WaitForHello,              //handshake active
-    WaitForRa,                //prover + verifier active
-    WaitForRaProver,          //prover active
-    WaitForRaVerifier,        //verifier active
-    WaitForDatAndRa,          //handshake + prover active
-    WaitForDatAndRaVerifier,  //handshake active
+    WaitForRa,                 //prover + verifier active
+    WaitForRaProver,           //prover active
+    WaitForRaVerifier,         //verifier active
+    WaitForDatAndRa,           //handshake + prover active
+    WaitForDatAndRaVerifier,   //handshake active
     WaitForAck,                //AckTimeout active
     Established,               //nothing active
 }
@@ -2549,19 +2549,9 @@ mod tests {
             v_ok(),
             Inactive
         ));
-        assert!(check_transition(
-            WaitForRa,
-            WaitForRa,
-            u_start(),
-            Inactive
-        ));
+        assert!(check_transition(WaitForRa, WaitForRa, u_start(), Inactive));
         assert!(check_transition(WaitForRa, locked(), u_stop(), Inactive));
-        assert!(check_transition(
-            WaitForRa,
-            WaitForRa,
-            u_re_ra(),
-            Inactive
-        ));
+        assert!(check_transition(WaitForRa, WaitForRa, u_re_ra(), Inactive));
         assert!(check_transition(WaitForRa, locked(), sc_err(), Inactive));
         assert!(check_transition(
             WaitForRa,
@@ -2575,9 +2565,7 @@ mod tests {
             DatTimeout,
             Inactive
         ));
-        assert!(check_transition(
-            WaitForRa, WaitForRa, RaTimeout, Inactive
-        ));
+        assert!(check_transition(WaitForRa, WaitForRa, RaTimeout, Inactive));
         //check all secure channel messages
         assert!(check_transition(
             WaitForRa,
