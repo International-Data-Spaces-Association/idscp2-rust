@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{FiniteStateMachine, FsmEvent};
-use crate::drivers::rat_driver::{RatDriver, RatMessage, RatRegistry};
+use crate::drivers::ra_driver::{RaDriver, RaMessage, RaRegistry};
 
 use openssl::x509::X509;
 
@@ -23,62 +23,62 @@ use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::thread;
 use thiserror::Error;
 
-///////////// Rat Driver Types for Generic Implementation ////////////////
-pub(super) struct RatProver;
-pub(super) struct RatVerifier;
+///////////// RA Driver Types for Generic Implementation ////////////////
+pub(super) struct RaProver;
+pub(super) struct RaVerifier;
 
-pub(super) trait RatDriverType {
-    fn create_event(msg: RatMessage) -> FsmEvent;
+pub(super) trait RaDriverType {
+    fn create_event(msg: RaMessage) -> FsmEvent;
 }
 
-impl RatDriverType for RatProver {
-    fn create_event(msg: RatMessage) -> FsmEvent {
-        FsmEvent::FromRatProver(msg)
+impl RaDriverType for RaProver {
+    fn create_event(msg: RaMessage) -> FsmEvent {
+        FsmEvent::FromRaProver(msg)
     }
 }
 
-impl RatDriverType for RatVerifier {
-    fn create_event(msg: RatMessage) -> FsmEvent {
-        FsmEvent::FromRatVerifier(msg)
+impl RaDriverType for RaVerifier {
+    fn create_event(msg: RaMessage) -> FsmEvent {
+        FsmEvent::FromRaVerifier(msg)
     }
 }
 /////////////////////////////////////////////////////////////////////////
 
 #[derive(Error, Debug)]
-pub enum RatError {
-    #[error("Cannot access RAT registry")]
+pub enum RaError {
+    #[error("Cannot access RA registry")]
     RegistryNotAvailable,
-    #[error("RAT driver is not available in the RAT registry")]
-    UnknownRatDriver,
-    #[error("No RAT driver activated")]
-    RatDriverInactive,
-    #[error("Connection to the RAT driver was aborted")]
-    RatConnectionAborted,
-    #[error("RAT driver has not been cached")]
-    RatDriverNotCached,
+    #[error("RA driver is not available in the RA registry")]
+    UnknownRaDriver,
+    #[error("No RA driver activated")]
+    RaDriverInactive,
+    #[error("Connection to the RA driver was aborted")]
+    RaConnectionAborted,
+    #[error("RA driver has not been cached")]
+    RaDriverNotCached,
 }
 
-// Rat Driver Interfaces
-// A rat driver interface is owned by the FiniteStateMachine and can only be used by this FSM
-// Since a FSM is only accessible via mutex lock, the RatDriverInterface can only be accessed by
+// RA Driver Interfaces
+// A RA driver interface is owned by the FiniteStateMachine and can only be used by this FSM
+// Since a FSM is only accessible via mutex lock, the RaDriverInterface can only be accessed by
 // one thread at a time
-struct RatDriverContent {
-    tx_to_driver: Sender<RatMessage>,
-    tx_to_listener: Sender<RatMessage>,
+struct RaDriverContent {
+    tx_to_driver: Sender<RaMessage>,
+    tx_to_listener: Sender<RaMessage>,
     listener: DriverListener,
 }
 
-pub(super) struct RatDriverInterface<RatType: RatDriverType + Send + Sync + 'static> {
+pub(super) struct RaDriverInterface<RaType: RaDriverType + Send + Sync + 'static> {
     pub(super) fsm: Weak<Mutex<FiniteStateMachine>>,
-    content: Option<RatDriverContent>,
-    cached_driver: Option<Arc<dyn RatDriver + Send + Sync>>,
-    phantom: PhantomData<RatType>,
+    content: Option<RaDriverContent>,
+    cached_driver: Option<Arc<dyn RaDriver + Send + Sync>>,
+    phantom: PhantomData<RaType>,
     peer_cert: X509,
 }
 
-impl<RatType: RatDriverType + Send + Sync + 'static> RatDriverInterface<RatType> {
-    pub(super) fn create(peer_cert: X509) -> Arc<Mutex<RatDriverInterface<RatType>>> {
-        Arc::new(Mutex::new(RatDriverInterface {
+impl<RaType: RaDriverType + Send + Sync + 'static> RaDriverInterface<RaType> {
+    pub(super) fn create(peer_cert: X509) -> Arc<Mutex<RaDriverInterface<RaType>>> {
+        Arc::new(Mutex::new(RaDriverInterface {
             fsm: Weak::new(),
             content: None,
             cached_driver: None,
@@ -89,25 +89,25 @@ impl<RatType: RatDriverType + Send + Sync + 'static> RatDriverInterface<RatType>
 
     pub(super) fn start_driver(
         &mut self,
-        rat_mechanism: &str,
-        registry: Weak<RatRegistry>,
-        strong_ref_interface: Arc<Mutex<RatDriverInterface<RatType>>>,
-    ) -> Result<(), RatError> {
+        ra_mechanism: &str,
+        registry: Weak<RaRegistry>,
+        strong_ref_interface: Arc<Mutex<RaDriverInterface<RaType>>>,
+    ) -> Result<(), RaError> {
         // terminate running driver
         self.stop_driver();
 
         // get driver from registry
         let registry = match registry.upgrade() {
             None => {
-                return Err(RatError::RegistryNotAvailable);
+                return Err(RaError::RegistryNotAvailable);
             }
 
             Some(r) => r,
         };
 
-        let driver_clone = match registry.get_driver(rat_mechanism) {
+        let driver_clone = match registry.get_driver(ra_mechanism) {
             None => {
-                return Err(RatError::UnknownRatDriver);
+                return Err(RaError::UnknownRaDriver);
             }
             Some(driver) => Arc::clone(driver),
         };
@@ -119,8 +119,8 @@ impl<RatType: RatDriverType + Send + Sync + 'static> RatDriverInterface<RatType>
 
     pub(super) fn restart_driver(
         &mut self,
-        strong_ref_interface: Arc<Mutex<RatDriverInterface<RatType>>>,
-    ) -> Result<(), RatError> {
+        strong_ref_interface: Arc<Mutex<RaDriverInterface<RaType>>>,
+    ) -> Result<(), RaError> {
         // terminate running driver
         self.stop_driver();
 
@@ -129,11 +129,11 @@ impl<RatType: RatDriverType + Send + Sync + 'static> RatDriverInterface<RatType>
 
     fn run_driver(
         &mut self,
-        strong_ref_interface: Arc<Mutex<RatDriverInterface<RatType>>>,
-    ) -> Result<(), RatError> {
+        strong_ref_interface: Arc<Mutex<RaDriverInterface<RaType>>>,
+    ) -> Result<(), RaError> {
         let driver_clone = match &self.cached_driver {
             None => {
-                return Err(RatError::RatDriverNotCached);
+                return Err(RaError::RaDriverNotCached);
             }
 
             Some(driver) => Arc::clone(driver),
@@ -148,7 +148,7 @@ impl<RatType: RatDriverType + Send + Sync + 'static> RatDriverInterface<RatType>
         let listener = DriverListener::new();
 
         // create interface content
-        let content = RatDriverContent {
+        let content = RaDriverContent {
             tx_to_driver,
             tx_to_listener: tx_to_interface.clone(),
             listener,
@@ -165,36 +165,36 @@ impl<RatType: RatDriverType + Send + Sync + 'static> RatDriverInterface<RatType>
         let content = self.content.as_mut().unwrap();
         content
             .listener
-            .listen::<RatType>(fsm_clone, strong_ref_interface, rx_from_driver);
+            .listen::<RaType>(fsm_clone, strong_ref_interface, rx_from_driver);
 
         Ok(())
     }
 
-    pub(super) fn write_to_driver(&self, msg: RatMessage) -> Result<(), RatError> {
+    pub(super) fn write_to_driver(&self, msg: RaMessage) -> Result<(), RaError> {
         let sender = match &self.content {
-            None => return Err(RatError::RatDriverInactive),
+            None => return Err(RaError::RaDriverInactive),
 
             Some(content) => &content.tx_to_driver,
         };
 
         match sender.send(msg) {
-            Err(_) => Err(RatError::RatConnectionAborted),
+            Err(_) => Err(RaError::RaConnectionAborted),
             Ok(_) => Ok(()),
         }
     }
 
     pub(super) fn stop_driver(&mut self) {
         //take content from interface is available and than terminate listener and close channels
-        log::debug!("decoupling from RAT driver");
+        log::debug!("decoupling from RA driver");
         match self.content.take() {
-            None => log::debug!("not connected to a RAT driver. Nothing to do."),
+            None => log::debug!("not connected to a RA driver. Nothing to do."),
 
             Some(mut content) => {
                 //stop listener
                 content.listener.stop();
 
                 //send something to listener to unblock receive
-                let _ = content.tx_to_listener.send(RatMessage::RawData(vec![]));
+                let _ = content.tx_to_listener.send(RaMessage::RawData(vec![]));
 
                 //close channels
                 drop(content.tx_to_listener);
@@ -230,11 +230,11 @@ impl DriverListener {
     }
 
     //from upper layer, start listener thread
-    fn listen<RatType: RatDriverType + Send + Sync + 'static>(
+    fn listen<RaType: RaDriverType + Send + Sync + 'static>(
         &mut self,
         fsm: Weak<Mutex<FiniteStateMachine>>,
-        interface: Arc<Mutex<RatDriverInterface<RatType>>>,
-        rx_from_driver: Receiver<RatMessage>,
+        interface: Arc<Mutex<RaDriverInterface<RaType>>>,
+        rx_from_driver: Receiver<RaMessage>,
     ) {
         if self.is_locked {
             log::warn!("Driver Listener was already in use, but can only be started once");
@@ -297,7 +297,7 @@ impl DriverListener {
                             return;
                         } else {
                             // driver was not cancelled, delegate message to fsm
-                            let _ = (*fsm_guard).process_event(RatType::create_event(msg));
+                            let _ = (*fsm_guard).process_event(RaType::create_event(msg));
                         }
                     }
                 }
@@ -320,7 +320,7 @@ mod tests {
     use super::*;
     use crate::api::idscp_configuration::AttestationConfig;
     use crate::drivers::daps_driver::DapsDriver;
-    use crate::drivers::rat_driver;
+    use crate::drivers::ra_driver;
     use crate::drivers::secure_channel::SecureChannel;
     use crate::fsm::HandshakeResult;
     use openssl::hash::MessageDigest;
@@ -332,13 +332,13 @@ mod tests {
     use std::sync::Condvar;
     use std::time::Duration;
 
-    struct RatDummy {}
-    impl rat_driver::RatDriver for RatDummy {
+    struct RaDummy {}
+    impl ra_driver::RaDriver for RaDummy {
         fn get_id(&self) -> &'static str {
-            "RatDummy"
+            "RaDummy"
         }
 
-        fn execute(&self, _tx: Sender<RatMessage>, rx: Receiver<RatMessage>, _peer_cert: X509) {
+        fn execute(&self, _tx: Sender<RaMessage>, rx: Receiver<RaMessage>, _peer_cert: X509) {
             println!("Dummy has been started");
             match rx.recv() {
                 Err(_) => {
@@ -414,11 +414,11 @@ mod tests {
     }
 
     #[test]
-    fn rat_interface_test() {
+    fn ra_interface_test() {
         //create registry
-        let verifier_registry = RatRegistry::new();
-        let mut prover_registry = RatRegistry::new();
-        let prover = RatDummy {};
+        let verifier_registry = RaRegistry::new();
+        let mut prover_registry = RaRegistry::new();
+        let prover = RaDummy {};
         prover_registry.register_driver(Arc::new(prover));
 
         let handshake_cond = Arc::new((Mutex::new(HandshakeResult::NotAvailable), Condvar::new()));
@@ -434,7 +434,7 @@ mod tests {
             AttestationConfig {
                 supported_attestation_suite: vec![],
                 expected_attestation_suite: vec![],
-                rat_timeout: Duration::from_millis(1000),
+                ra_timeout: Duration::from_millis(1000),
             },
         );
 
@@ -442,7 +442,7 @@ mod tests {
         let fsm_guard = fsm.lock().unwrap();
 
         //get prover interface clones
-        let prover_arc = Arc::clone(&fsm_guard.rat_prover);
+        let prover_arc = Arc::clone(&fsm_guard.ra_prover);
 
         let prover_strong = Arc::clone(&prover_arc);
 
@@ -452,15 +452,15 @@ mod tests {
         //check if content is none
         assert!((*prover_guard).content.is_none());
 
-        let mut prover_registry = RatRegistry::new();
-        let prover = RatDummy {};
+        let mut prover_registry = RaRegistry::new();
+        let prover = RaDummy {};
         prover_registry.register_driver(Arc::new(prover));
         let prover_registry = Arc::new(prover_registry);
 
         //start prover driver
 
         assert!((*prover_guard)
-            .start_driver("RatDummy", Arc::downgrade(&prover_registry), prover_strong)
+            .start_driver("RaDummy", Arc::downgrade(&prover_registry), prover_strong)
             .is_ok());
 
         //check if content is some
@@ -468,7 +468,7 @@ mod tests {
 
         //write to prover
         assert!((*prover_guard)
-            .write_to_driver(RatMessage::RawData(Vec::from("Hello")))
+            .write_to_driver(RaMessage::RawData(Vec::from("Hello")))
             .is_ok());
 
         //stop prover again

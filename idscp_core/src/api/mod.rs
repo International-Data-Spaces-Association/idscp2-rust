@@ -29,8 +29,8 @@ pub enum IdscpError {
     ConnectionAborted(#[from] FsmError),
     #[error("Connection was never started")]
     ConnectionNotStarted,
-    #[error("RAT error occurred")]
-    RatError,
+    #[error("RA error occurred")]
+    RaError,
     #[error("Unknown error occurred")]
     Other(#[from] anyhow::Error),
 }

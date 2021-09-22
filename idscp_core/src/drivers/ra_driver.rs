@@ -18,52 +18,52 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum RatIcm {
+pub enum RaIcm {
     OK,
     Failed,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum RatMessage {
-    ControlMessage(RatIcm),
+pub enum RaMessage {
+    ControlMessage(RaIcm),
     RawData(Vec<u8>),
 }
 
-pub trait RatDriver {
-    fn execute(&self, tx: Sender<RatMessage>, rx: Receiver<RatMessage>, cert: X509);
+pub trait RaDriver {
+    fn execute(&self, tx: Sender<RaMessage>, rx: Receiver<RaMessage>, cert: X509);
     fn get_id(&self) -> &'static str;
 }
 
-// *********** Rat Registry *********** //
+// *********** RA Registry *********** //
 #[derive(Clone)]
-pub struct RatRegistry {
-    drivers: HashMap<&'static str, Arc<dyn RatDriver + Send + Sync>>,
+pub struct RaRegistry {
+    drivers: HashMap<&'static str, Arc<dyn RaDriver + Send + Sync>>,
 }
 
-impl RatRegistry {
-    pub fn new() -> RatRegistry {
-        log::info!("Create new rat driver registry");
-        RatRegistry {
-            drivers: HashMap::<&'static str, Arc<dyn RatDriver + Send + Sync>>::new(),
+impl RaRegistry {
+    pub fn new() -> RaRegistry {
+        log::info!("Create new RA driver registry");
+        RaRegistry {
+            drivers: HashMap::<&'static str, Arc<dyn RaDriver + Send + Sync>>::new(),
         }
     }
 
-    pub fn register_driver(&mut self, driver: Arc<dyn RatDriver + Send + Sync>) {
+    pub fn register_driver(&mut self, driver: Arc<dyn RaDriver + Send + Sync>) {
         // TODO: return error if there already exists a driver with that ID, because there should be no ambiguity
         let id = driver.get_id();
         self.drivers.insert(id, driver);
         log::info!(
-            "New rat driver with id '{}' was registered in registry and is now available",
+            "New RA driver with id '{}' was registered in registry and is now available",
             id
         );
     }
 
     pub fn unregister_driver(&mut self, id: &'static str) {
-        log::info!("Try to remove rat driver with id '{}' from registry", id);
+        log::info!("Try to remove RA driver with id '{}' from registry", id);
         self.drivers.remove(id);
     }
 
-    pub fn get_driver(&self, id: &str) -> Option<&Arc<dyn RatDriver + Send + Sync>> {
+    pub fn get_driver(&self, id: &str) -> Option<&Arc<dyn RaDriver + Send + Sync>> {
         self.drivers.get(id)
     }
 
@@ -74,7 +74,7 @@ impl RatRegistry {
 
 #[cfg(test)]
 mod tests {
-    use crate::drivers::rat_driver::{RatDriver, RatIcm, RatMessage, RatRegistry};
+    use crate::drivers::ra_driver::{RaDriver, RaIcm, RaMessage, RaRegistry};
     use openssl::x509::X509;
     use std::path::PathBuf;
     use std::sync::mpsc::{Receiver, Sender};
@@ -84,9 +84,9 @@ mod tests {
     const TEST_DRIVER_ID: &'static str = "test.driver.id";
 
     pub struct TestDriver {}
-    impl RatDriver for TestDriver {
-        fn execute(&self, tx: Sender<RatMessage>, _rx: Receiver<RatMessage>, _peer_cert: X509) {
-            if tx.send(RatMessage::ControlMessage(RatIcm::OK)).is_err() {
+    impl RaDriver for TestDriver {
+        fn execute(&self, tx: Sender<RaMessage>, _rx: Receiver<RaMessage>, _peer_cert: X509) {
+            if tx.send(RaMessage::ControlMessage(RaIcm::OK)).is_err() {
                 log::warn!("Prover was terminated from fsm");
             }
         }
@@ -107,8 +107,8 @@ mod tests {
     }
 
     #[test]
-    fn test_rat_registries() {
-        let mut registry = RatRegistry::new();
+    fn test_ra_registries() {
+        let mut registry = RaRegistry::new();
 
         let driver = registry.get_driver(TEST_DRIVER_ID);
         assert!(driver.is_none());

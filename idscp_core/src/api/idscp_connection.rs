@@ -65,10 +65,10 @@ impl Idscp2Connection {
         self.incoming_message_rx.recv_timeout(timeout)
     }
 
-    pub fn repeat_rat(&self) -> Result<(), IdscpError> {
+    pub fn repeat_ra(&self) -> Result<(), IdscpError> {
         let guard = self.inner.lock().unwrap();
         let inner_connection = &*guard;
-        inner_connection.repeat_rat()
+        inner_connection.repeat_ra()
     }
 }
 
@@ -176,7 +176,7 @@ impl InnerIdscp2connection {
         }
     }
 
-    fn repeat_rat(&self) -> Result<(), IdscpError> {
+    fn repeat_ra(&self) -> Result<(), IdscpError> {
         log::debug!("triggering re-attestation");
 
         let mut guard = match self.fsm.lock() {
@@ -187,13 +187,13 @@ impl InnerIdscp2connection {
             Ok(guard) => guard,
         };
 
-        match (*guard).feed_user_event(UserEvent::RepeatRat) {
+        match (*guard).feed_user_event(UserEvent::RepeatRa) {
             Ok(()) => Ok(()),
             Err(e) => match e {
                 FsmError::FsmLocked => Err(IdscpError::ConnectionAborted(e)),
                 FsmError::FsmNotStarted => Err(IdscpError::ConnectionNotStarted),
                 FsmError::IoError(_) => Err(IdscpError::ConnectionAborted(e)),
-                FsmError::RatError(_) => Err(IdscpError::RatError),
+                FsmError::RaError(_) => Err(IdscpError::RaError),
                 _ => Err(IdscpError::Other(anyhow::Error::new(e))),
             },
         }

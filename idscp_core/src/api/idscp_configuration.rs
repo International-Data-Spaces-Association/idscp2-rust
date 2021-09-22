@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::drivers::daps_driver::DapsDriver;
-use crate::drivers::rat_driver::RatRegistry;
+use crate::drivers::ra_driver::RaRegistry;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,15 +24,15 @@ pub struct AttestationConfig {
     // TODO: rename to "supported_provers" and "supported verifiers"
     pub supported_attestation_suite: Vec<String>,
     pub expected_attestation_suite: Vec<String>,
-    pub rat_timeout: Duration,
+    pub ra_timeout: Duration,
 }
 
 #[derive(Clone)] //TODO check if the derived clone functionality is exactly what we want
 pub struct Idscp2Configuration {
-    pub rat_config: AttestationConfig,
+    pub ra_config: AttestationConfig,
     pub daps: Arc<dyn DapsDriver + Send + Sync>,
-    pub prover_registry: RatRegistry,
-    pub verifier_registry: RatRegistry,
+    pub prover_registry: RaRegistry,
+    pub verifier_registry: RaRegistry,
     pub handshake_timeout: Duration,
     pub ack_timeout: Duration,
 }

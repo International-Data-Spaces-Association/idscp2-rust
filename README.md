@@ -1,9 +1,9 @@
-The IDSCPv2 Rust implementation
+The IDSCP2 Rust implementation
 ================================
 
 ![CI pipeline status](https://github.com/International-Data-Spaces-Association/idscp2-rust/actions/workflows/ci.yml/badge.svg)
 
-The Rust implementation of the IDSCPv2 transport layer.  
+The Rust implementation of the IDSCP2 transport layer.  
 
 The IDSCP protocol establishes a secure peer-to-peer connection that provides **mutual remote attestation** and guarantees 
 confidentiality, integrity, authenticity and perfect forward secrecy.
@@ -13,7 +13,7 @@ remote attestation.
 The Rust implementation **currently only runs on Linux** (tested on Ubuntu 18.04 and 20.04)
 
 ## Disclaimer
-The IDSCPv2 transport layer protocol and its Rust implementation is still in early stages of development and **should
+The IDSCP2 transport layer protocol and its Rust implementation is still in early stages of development and **should
 not be used in production**.
 
 ## Building
@@ -80,7 +80,7 @@ Fraunhofer AISEC is developing multiple "drivers" for different remote attestati
 Intel SGX, AMD SEV) which are currently not licensed as open source. If you want to use our implementations, please get
 in touch.
 
-The [NullRat driver](idscp_default_drivers/src/rat_drivers/null_rat) provided with this repository is
+The [NullRa driver](idscp_default_drivers/src/ra_drivers/null_ra) provided with this repository is
 only a dummy driver that can be used to opt-out of remote attestation when using IDSCP.
 **It should not be used in security critical applications that really rely on remote attestation.**  
 

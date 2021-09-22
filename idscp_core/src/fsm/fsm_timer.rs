@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 pub(super) struct HandshakeTimer;
-pub(super) struct RatTimer;
+pub(super) struct RaTimer;
 pub(super) struct DatTimer;
 pub(super) struct AckTimer;
 
@@ -33,9 +33,9 @@ impl TimerImpl for HandshakeTimer {
     }
 }
 
-impl TimerImpl for RatTimer {
+impl TimerImpl for RaTimer {
     fn create_event() -> FsmEvent {
-        FsmEvent::RatTimeout
+        FsmEvent::RaTimeout
     }
 }
 

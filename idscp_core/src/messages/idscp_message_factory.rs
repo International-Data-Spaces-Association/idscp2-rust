@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::idscpv2_messages::{
+use super::idscp2_messages::{
     IdscpAck, IdscpClose, IdscpClose_CloseCause, IdscpDat, IdscpDatExpired, IdscpData, IdscpHello,
-    IdscpMessage, IdscpRatProver, IdscpRatVerifier, IdscpReRat,
+    IdscpMessage, IdscpRaProver, IdscpRaVerifier, IdscpReRa,
 };
 use crate::fsm::alternating_bit::AlternatingBit;
 use bytes::Bytes;
@@ -22,8 +22,8 @@ use protobuf::SingularPtrField;
 
 pub(crate) fn create_idscp_hello(
     dat: Vec<u8>,
-    expected_rat_suite: &[String],
-    supported_rat_suite: &[String],
+    expected_ra_suite: &[String],
+    supported_ra_suite: &[String],
 ) -> IdscpMessage {
     let mut idscp_dat = IdscpDat::new();
     idscp_dat.token = Bytes::from(dat);
@@ -31,8 +31,8 @@ pub(crate) fn create_idscp_hello(
     let mut hello = IdscpHello::new();
     hello.version = 2;
     hello.dynamicAttributeToken = SingularPtrField::some(idscp_dat);
-    hello.expectedRatSuite = protobuf::RepeatedField::from_ref(expected_rat_suite);
-    hello.supportedRatSuite = protobuf::RepeatedField::from_ref(supported_rat_suite);
+    hello.expectedRaSuite = protobuf::RepeatedField::from_ref(expected_ra_suite);
+    hello.supportedRaSuite = protobuf::RepeatedField::from_ref(supported_ra_suite);
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpHello(hello);
@@ -64,30 +64,30 @@ pub(crate) fn create_idscp_dat(dat: Vec<u8>) -> IdscpMessage {
     idscp
 }
 
-pub(crate) fn create_idscp_re_rat(cause: &'static str) -> IdscpMessage {
-    let mut idscp_rerat = IdscpReRat::new();
-    idscp_rerat.cause = String::from(cause);
+pub(crate) fn create_idscp_re_ra(cause: &'static str) -> IdscpMessage {
+    let mut idscp_rera = IdscpReRa::new();
+    idscp_rera.cause = String::from(cause);
 
     let mut idscp = IdscpMessage::new();
-    idscp.set_idscpReRat(idscp_rerat);
+    idscp.set_idscpReRa(idscp_rera);
     idscp
 }
 
-pub(crate) fn create_idscp_rat_prover(data: Vec<u8>) -> IdscpMessage {
-    let mut idscp_p = IdscpRatProver::new();
+pub(crate) fn create_idscp_ra_prover(data: Vec<u8>) -> IdscpMessage {
+    let mut idscp_p = IdscpRaProver::new();
     idscp_p.data = Bytes::from(data);
 
     let mut idscp = IdscpMessage::new();
-    idscp.set_idscpRatProver(idscp_p);
+    idscp.set_idscpRaProver(idscp_p);
     idscp
 }
 
-pub(crate) fn create_idscp_rat_verifier(data: Vec<u8>) -> IdscpMessage {
-    let mut idscp_v = IdscpRatVerifier::new();
+pub(crate) fn create_idscp_ra_verifier(data: Vec<u8>) -> IdscpMessage {
+    let mut idscp_v = IdscpRaVerifier::new();
     idscp_v.data = Bytes::from(data);
 
     let mut idscp = IdscpMessage::new();
-    idscp.set_idscpRatVerifier(idscp_v);
+    idscp.set_idscpRaVerifier(idscp_v);
     idscp
 }
 
