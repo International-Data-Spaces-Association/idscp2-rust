@@ -13,5 +13,5 @@
 // limitations under the License.
 
 pub mod daps_drivers;
-pub mod rat_drivers;
+pub mod ra_drivers;
 pub mod secure_channels;

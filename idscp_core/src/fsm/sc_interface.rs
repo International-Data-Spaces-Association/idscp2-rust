@@ -14,7 +14,7 @@
 
 use super::{FiniteStateMachine, FsmEvent, SecureChannelEvent};
 use crate::drivers::secure_channel::SecureChannel;
-use crate::messages::idscpv2_messages::{IdscpMessage, IdscpMessage_oneof_message};
+use crate::messages::idscp2_messages::{IdscpMessage, IdscpMessage_oneof_message};
 use protobuf::parse_from_bytes;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
@@ -203,7 +203,7 @@ impl SecureChannelListener {
                             }
                             Ok(msg) => match msg.message {
                                 None => {
-                                    log::warn!("Received IDSCPv2 msg is empty");
+                                    log::warn!("Received IDSCP2 msg is empty");
                                     return;
                                 }
                                 Some(b) => b,
@@ -228,16 +228,16 @@ impl SecureChannelListener {
                                 SecureChannelEvent::DatExp(data)
                             }
 
-                            IdscpMessage_oneof_message::idscpRatProver(data) => {
-                                SecureChannelEvent::RatProver(data)
+                            IdscpMessage_oneof_message::idscpRaProver(data) => {
+                                SecureChannelEvent::RaProver(data)
                             }
 
-                            IdscpMessage_oneof_message::idscpRatVerifier(data) => {
-                                SecureChannelEvent::RatVerifier(data)
+                            IdscpMessage_oneof_message::idscpRaVerifier(data) => {
+                                SecureChannelEvent::RaVerifier(data)
                             }
 
-                            IdscpMessage_oneof_message::idscpReRat(data) => {
-                                SecureChannelEvent::ReRat(data)
+                            IdscpMessage_oneof_message::idscpReRa(data) => {
+                                SecureChannelEvent::ReRa(data)
                             }
 
                             IdscpMessage_oneof_message::idscpData(data) => {

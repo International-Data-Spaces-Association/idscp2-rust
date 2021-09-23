@@ -15,12 +15,12 @@
 use protoc_rust::Customize;
 use std::path::Path;
 
-const PROTO_FILE_PATHS: &str = "src/messages/idscpv2_messages.proto";
+const PROTO_FILE_PATHS: &str = "src/messages/idscp2_messages.proto";
 // const PROTO_INCLUDE_PATH: &Path = """;
 const GEN_OUT_DIR: &str = "src/messages";
 
 fn main() {
-    println!("cargo:rerun-if-changed=src/messages/idscpv2_messages.proto");
+    println!("cargo:rerun-if-changed=src/messages/idscp2_messages.proto");
     std::fs::create_dir_all(GEN_OUT_DIR).expect(&format!(
         "could not create or find directory {}",
         GEN_OUT_DIR

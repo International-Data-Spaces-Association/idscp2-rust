@@ -15,10 +15,10 @@
 use idscp_core::api::idscp_configuration::Idscp2Configuration;
 
 use idscp_core::api::idscp_configuration::AttestationConfig;
-use idscp_core::drivers::rat_driver::RatRegistry;
+use idscp_core::drivers::ra_driver::RaRegistry;
 
 use idscp_default_drivers::daps_drivers::null_daps::NullDaps;
-use idscp_default_drivers::rat_drivers::null_rat::{NullRatProver, NullRatVerifier};
+use idscp_default_drivers::ra_drivers::null_ra::{NullRaProver, NullRaVerifier};
 
 use idscp_default_drivers::secure_channels::openssl::client::OpensslClient;
 use idscp_default_drivers::secure_channels::openssl::OpensslAddr;
@@ -44,17 +44,17 @@ use std::io::Write;
 const ASYNC_TIMOUT: Duration = Duration::from_millis(10);
 
 fn default_config() -> Idscp2Configuration {
-    let mut prover_registry = RatRegistry::new();
-    let mut verifier_registry = RatRegistry::new();
+    let mut prover_registry = RaRegistry::new();
+    let mut verifier_registry = RaRegistry::new();
 
     let daps = NullDaps {};
 
-    let (prover, verifier) = (Arc::new(NullRatProver {}), Arc::new(NullRatVerifier {}));
+    let (prover, verifier) = (Arc::new(NullRaProver {}), Arc::new(NullRaVerifier {}));
 
     prover_registry.register_driver(prover);
     verifier_registry.register_driver(verifier);
 
-    let rat_config = AttestationConfig {
+    let ra_config = AttestationConfig {
         supported_attestation_suite: prover_registry
             .get_all_driver_ids()
             .iter()
@@ -65,11 +65,11 @@ fn default_config() -> Idscp2Configuration {
             .iter()
             .map(|v| v.to_string())
             .collect(),
-        rat_timeout: Duration::from_secs(24 * 60 * 60),
+        ra_timeout: Duration::from_secs(24 * 60 * 60),
     };
 
     Idscp2Configuration {
-        rat_config,
+        ra_config,
         daps: Arc::new(daps),
         prover_registry,
         verifier_registry,
@@ -179,7 +179,7 @@ fn main() {
     let clap = App::new("IDSCP Socket Tunnel")
         .version("v0.1.0")
         .author("Oliver Braunsdorf <oliver.braunsdorf@aisec.fraunhofer.de>")
-        .about("Creates a unix socket that tunnels data through IDSCPv2")
+        .about("Creates a unix socket that tunnels data through IDSCP2")
         .arg(
             Arg::with_name("mode")
                 .short("m")

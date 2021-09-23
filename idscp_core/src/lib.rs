@@ -96,7 +96,7 @@ fn create_new_idscp2_connection(
         Arc::clone(&handshake_wait),
         config.handshake_timeout,
         config.ack_timeout,
-        config.rat_config.clone(),
+        config.ra_config.clone(),
     );
 
     //start fsm handshake

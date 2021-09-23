@@ -16,9 +16,9 @@ use idscp_core::api::idscp_configuration::AttestationConfig;
 use idscp_core::api::idscp_configuration::Idscp2Configuration;
 use idscp_core::api::idscp_connection::{Idscp2Connection, IdscpEvent};
 
-use idscp_core::drivers::rat_driver::RatRegistry;
+use idscp_core::drivers::ra_driver::RaRegistry;
 use idscp_default_drivers::daps_drivers::null_daps::NullDaps;
-use idscp_default_drivers::rat_drivers::null_rat::{NullRatProver, NullRatVerifier};
+use idscp_default_drivers::ra_drivers::null_ra::{NullRaProver, NullRaVerifier};
 use idscp_default_drivers::secure_channels::openssl::client::OpensslClient;
 use idscp_default_drivers::secure_channels::openssl::server::OpensslServer;
 use idscp_default_drivers::secure_channels::openssl::OpensslAddr;
@@ -129,7 +129,7 @@ fn server_to_client_1_to_2() {
 }
 
 #[test]
-fn server_to_client_repeat_rat() {
+fn server_to_client_repeat_ra() {
     common::setup_logging();
 
     let addr = OpensslAddr {
@@ -142,7 +142,7 @@ fn server_to_client_repeat_rat() {
     println!("Start listening at {}:{}", addr.hostname, addr.port);
     let server_addr = addr.clone();
     thread::spawn(move || {
-        start_listener_with_rerat(secure_channel_server, server_addr, config_server);
+        start_listener_with_rera(secure_channel_server, server_addr, config_server);
     });
 
     println!("setting up idscp connection");
@@ -222,7 +222,7 @@ fn wait_for_reconnection(idscp_connection: &Idscp2Connection) {
     }
 }
 
-fn start_listener_with_rerat(
+fn start_listener_with_rera(
     secure_channel_server: OpensslServer,
     addr: OpensslAddr,
     config: Idscp2Configuration,
@@ -237,7 +237,7 @@ fn start_listener_with_rerat(
             thread::sleep(Duration::from_millis(1000));
             for i in 0..10u32 {
                 if i % 2 == 0 {
-                    connection.repeat_rat().unwrap();
+                    connection.repeat_ra().unwrap();
                     wait_for_reconnection(&connection);
                 }
                 assert_eq!(connection.is_connected(), true);
@@ -315,16 +315,16 @@ fn connect(
 fn setup_idscp_connection() -> (OpensslClient, Idscp2Configuration) {
     log::info!("Initialize Client");
 
-    let mut prover_registry = RatRegistry::new();
-    let mut verifier_registry = RatRegistry::new();
+    let mut prover_registry = RaRegistry::new();
+    let mut verifier_registry = RaRegistry::new();
 
     let daps_client = NullDaps {};
-    let prover = Arc::new(NullRatProver {});
-    let verifier = Arc::new(NullRatVerifier {});
+    let prover = Arc::new(NullRaProver {});
+    let verifier = Arc::new(NullRaVerifier {});
     prover_registry.register_driver(prover);
     verifier_registry.register_driver(verifier);
 
-    let rat_config = AttestationConfig {
+    let ra_config = AttestationConfig {
         supported_attestation_suite: prover_registry
             .get_all_driver_ids()
             .iter()
@@ -335,11 +335,11 @@ fn setup_idscp_connection() -> (OpensslClient, Idscp2Configuration) {
             .iter()
             .map(|v| v.to_string())
             .collect(),
-        rat_timeout: Duration::from_secs(24 * 60 * 60),
+        ra_timeout: Duration::from_secs(24 * 60 * 60),
     };
 
     let config = Idscp2Configuration {
-        rat_config,
+        ra_config,
         daps: Arc::new(daps_client),
         prover_registry,
         verifier_registry,
@@ -373,17 +373,17 @@ fn setup_idscp_connection() -> (OpensslClient, Idscp2Configuration) {
 }
 
 fn setup_idscp_listener() -> (OpensslServer, Idscp2Configuration) {
-    let mut prover_registry = RatRegistry::new();
-    let mut verifier_registry = RatRegistry::new();
+    let mut prover_registry = RaRegistry::new();
+    let mut verifier_registry = RaRegistry::new();
 
     let daps_client = NullDaps {};
 
-    let prover = Arc::new(NullRatProver {});
-    let verifier = Arc::new(NullRatVerifier {});
+    let prover = Arc::new(NullRaProver {});
+    let verifier = Arc::new(NullRaVerifier {});
     prover_registry.register_driver(prover);
     verifier_registry.register_driver(verifier);
 
-    let rat_config = AttestationConfig {
+    let ra_config = AttestationConfig {
         supported_attestation_suite: prover_registry
             .get_all_driver_ids()
             .iter()
@@ -394,11 +394,11 @@ fn setup_idscp_listener() -> (OpensslServer, Idscp2Configuration) {
             .iter()
             .map(|v| v.to_string())
             .collect(),
-        rat_timeout: Duration::from_secs(24 * 60 * 60),
+        ra_timeout: Duration::from_secs(24 * 60 * 60),
     };
 
     let config = Idscp2Configuration {
-        rat_config,
+        ra_config,
         daps: Arc::new(daps_client),
         prover_registry,
         verifier_registry,

@@ -16,11 +16,11 @@ use idscp_core::api::idscp_configuration::Idscp2Configuration;
 
 use idscp_core::api::idscp_configuration::AttestationConfig;
 use idscp_core::api::idscp_server::Idscp2Server;
-use idscp_core::drivers::rat_driver::RatRegistry;
+use idscp_core::drivers::ra_driver::RaRegistry;
 use idscp_default_drivers::daps_drivers::null_daps::NullDaps;
 
-#[cfg(not(feature = "tpm_rat"))]
-use idscp_default_drivers::rat_drivers::null_rat::{NullRatProver, NullRatVerifier};
+#[cfg(not(feature = "tpm_ra"))]
+use idscp_default_drivers::ra_drivers::null_ra::{NullRaProver, NullRaVerifier};
 
 use idscp_default_drivers::secure_channels::openssl::server::OpensslServer;
 use idscp_default_drivers::secure_channels::openssl::OpensslAddr;
@@ -34,24 +34,24 @@ use std::time::Duration;
 mod common;
 
 fn setup_idscp_listener() -> (OpensslServer, OpensslAddr, Idscp2Configuration) {
-    let mut prover_registry = RatRegistry::new();
-    let mut verifier_registry = RatRegistry::new();
+    let mut prover_registry = RaRegistry::new();
+    let mut verifier_registry = RaRegistry::new();
 
     let daps_client = NullDaps {};
 
-    #[cfg(feature = "tpm_rat")]
+    #[cfg(feature = "tpm_ra")]
     let (prover, verifier) = (
-        common::tpm_rat::setup_tpm_prover(),
-        common::tpm_rat::setup_tpm_verifier(),
+        common::tpm_ra::setup_tpm_prover(),
+        common::tpm_ra::setup_tpm_verifier(),
     );
 
-    #[cfg(not(feature = "tpm_rat"))]
-    let (prover, verifier) = (Arc::new(NullRatProver {}), Arc::new(NullRatVerifier {}));
+    #[cfg(not(feature = "tpm_ra"))]
+    let (prover, verifier) = (Arc::new(NullRaProver {}), Arc::new(NullRaVerifier {}));
 
     prover_registry.register_driver(prover);
     verifier_registry.register_driver(verifier);
 
-    let rat_config = AttestationConfig {
+    let ra_config = AttestationConfig {
         supported_attestation_suite: prover_registry
             .get_all_driver_ids()
             .iter()
@@ -62,11 +62,11 @@ fn setup_idscp_listener() -> (OpensslServer, OpensslAddr, Idscp2Configuration) {
             .iter()
             .map(|v| v.to_string())
             .collect(),
-        rat_timeout: Duration::from_secs(24 * 60 * 60),
+        ra_timeout: Duration::from_secs(24 * 60 * 60),
     };
 
     let config = Idscp2Configuration {
-        rat_config,
+        ra_config,
         daps: Arc::new(daps_client),
         prover_registry,
         verifier_registry,

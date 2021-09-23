@@ -12,36 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use idscp_core::drivers::rat_driver::{RatDriver, RatIcm, RatMessage};
+use idscp_core::drivers::ra_driver::{RaDriver, RaIcm, RaMessage};
 use openssl::x509::X509;
 use std::sync::mpsc::{Receiver, Sender};
 
-pub struct NullRatProver {}
-pub struct NullRatVerifier {}
-impl RatDriver for NullRatProver {
-    fn execute(&self, tx: Sender<RatMessage>, rx: Receiver<RatMessage>, _peer_cert: X509) {
-        tx.send(RatMessage::RawData(b"".to_vec())).unwrap();
+pub struct NullRaProver {}
+pub struct NullRaVerifier {}
+impl RaDriver for NullRaProver {
+    fn execute(&self, tx: Sender<RaMessage>, rx: Receiver<RaMessage>, _peer_cert: X509) {
+        tx.send(RaMessage::RawData(b"".to_vec())).unwrap();
         rx.recv().unwrap();
-        if tx.send(RatMessage::ControlMessage(RatIcm::OK)).is_err() {
+        if tx.send(RaMessage::ControlMessage(RaIcm::OK)).is_err() {
             log::warn!("Prover was terminated from fsm");
         }
     }
 
     fn get_id(&self) -> &'static str {
-        "NullRat"
+        "NullRa"
     }
 }
 
-impl RatDriver for NullRatVerifier {
-    fn execute(&self, tx: Sender<RatMessage>, rx: Receiver<RatMessage>, _peer_cert: X509) {
+impl RaDriver for NullRaVerifier {
+    fn execute(&self, tx: Sender<RaMessage>, rx: Receiver<RaMessage>, _peer_cert: X509) {
         rx.recv().unwrap();
-        tx.send(RatMessage::RawData(b"".to_vec())).unwrap();
-        if tx.send(RatMessage::ControlMessage(RatIcm::OK)).is_err() {
+        tx.send(RaMessage::RawData(b"".to_vec())).unwrap();
+        if tx.send(RaMessage::ControlMessage(RaIcm::OK)).is_err() {
             log::warn!("Prover was terminated from fsm");
         }
     }
 
     fn get_id(&self) -> &'static str {
-        "NullRat"
+        "NullRa"
     }
 }

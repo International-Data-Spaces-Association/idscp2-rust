@@ -14,22 +14,22 @@
 
 pub(super) mod alternating_bit;
 mod fsm_timer;
-mod rat_interface;
+mod ra_interface;
 mod sc_interface;
 
 use crate::api::idscp_configuration::AttestationConfig;
 use crate::api::idscp_connection::InnerIdscp2connection;
 use crate::drivers::daps_driver::DapsDriver;
-use crate::drivers::rat_driver::{RatIcm, RatMessage, RatRegistry};
+use crate::drivers::ra_driver::{RaIcm, RaMessage, RaRegistry};
 use crate::drivers::secure_channel::SecureChannel;
+use crate::messages::idscp2_messages::*;
 use crate::messages::idscp_message_factory;
-use crate::messages::idscpv2_messages::*;
 use fsm_timer::*;
 
-use crate::fsm::rat_interface::RatError;
+use crate::fsm::ra_interface::RaError;
 use crate::fsm::sc_interface::ScIfError;
 use protobuf::Message;
-use rat_interface::{RatDriverInterface, RatProver, RatVerifier};
+use ra_interface::{RaDriverInterface, RaProver, RaVerifier};
 use sc_interface::SecureChannelInterface;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
@@ -41,9 +41,9 @@ use alternating_bit::AlternatingBit;
 // FSM Events
 #[derive(Debug, Clone)]
 enum FsmEvent {
-    // RAT DRIVER EVENTS
-    FromRatProver(RatMessage),
-    FromRatVerifier(RatMessage),
+    // RA DRIVER EVENTS
+    FromRaProver(RaMessage),
+    FromRaVerifier(RaMessage),
 
     // USER EVENTS
     FromUpper(UserEvent),
@@ -52,7 +52,7 @@ enum FsmEvent {
     FromSecureChannel(SecureChannelEvent),
 
     // TIMEOUT EVENTS
-    RatTimeout,
+    RaTimeout,
     DatTimeout,
     HandshakeTimeout,
     AckTimeout,
@@ -64,9 +64,9 @@ enum SecureChannelEvent {
     Hello(IdscpHello),
     Dat(IdscpDat),
     DatExp(IdscpDatExpired),
-    RatProver(IdscpRatProver),
-    RatVerifier(IdscpRatVerifier),
-    ReRat(IdscpReRat),
+    RaProver(IdscpRaProver),
+    RaVerifier(IdscpRaVerifier),
+    ReRa(IdscpReRa),
     Data(IdscpData),
     Error,
     Ack(IdscpAck),
@@ -76,7 +76,7 @@ enum SecureChannelEvent {
 pub enum UserEvent {
     StartHandshake,
     Stop,
-    RepeatRat,
+    RepeatRa,
     Data(Vec<u8>),
 }
 
@@ -91,11 +91,11 @@ enum ClosedStateStatus {
 enum FsmState {
     Closed(ClosedStateStatus), //nothing active
     WaitForHello,              //handshake active
-    WaitForRat,                //prover + verifier active
-    WaitForRatProver,          //prover active
-    WaitForRatVerifier,        //verifier active
-    WaitForDatAndRat,          //handshake + prover active
-    WaitForDatAndRatVerifier,  //handshake active
+    WaitForRa,                 //prover + verifier active
+    WaitForRaProver,           //prover active
+    WaitForRaVerifier,         //verifier active
+    WaitForDatAndRa,           //handshake + prover active
+    WaitForDatAndRaVerifier,   //handshake active
     WaitForAck,                //AckTimeout active
     Established,               //nothing active
 }
@@ -116,9 +116,9 @@ pub enum AckFlag {
 }
 
 #[derive(Error, Debug, PartialEq)]
-pub enum RatNegotiationError {
-    #[error("No RAT mechanism match found")]
-    NoRatMechanismMatch,
+pub enum RaNegotiationError {
+    #[error("No RA mechanism match found")]
+    NoRaMechanismMatch,
 }
 
 #[derive(Error, Debug)]
@@ -135,10 +135,10 @@ pub enum FsmError {
     InvalidDat,
     #[error("Cannot send or receive message via the secure channel interface")]
     IoError(#[from] ScIfError),
-    #[error("RAT action failed")]
-    RatError(#[from] RatError),
-    #[error("Error during negotiation of RAT mechanisms")]
-    RatNegotiationError(#[from] RatNegotiationError),
+    #[error("RA action failed")]
+    RaError(#[from] RaError),
+    #[error("Error during negotiation of RA mechanisms")]
+    RaNegotiationError(#[from] RaNegotiationError),
     #[error("Operation would block until FSM is in state 'Established'")]
     WouldBlock,
     #[error(
@@ -151,24 +151,24 @@ pub enum FsmError {
 
 // FSM
 pub(crate) struct FiniteStateMachine {
-    rat_prover: Arc<Mutex<RatDriverInterface<RatProver>>>,
-    rat_verifier: Arc<Mutex<RatDriverInterface<RatVerifier>>>,
+    ra_prover: Arc<Mutex<RaDriverInterface<RaProver>>>,
+    ra_verifier: Arc<Mutex<RaDriverInterface<RaVerifier>>>,
     current_state: FsmState,
     handshake_timer: StaticTimer<HandshakeTimer>,
-    prover_timer: StaticTimer<HandshakeTimer>, // TODO: maybe make new timer type "RatDriverTimer" to emit more precise error?
-    verifier_timer: StaticTimer<HandshakeTimer>, // TODO: maybe make new timer type "RatDriverTimer" to emit more precise error?
-    rat_timer: StaticTimer<RatTimer>,
+    prover_timer: StaticTimer<HandshakeTimer>, // TODO: maybe make new timer type "RaDriverTimer" to emit more precise error?
+    verifier_timer: StaticTimer<HandshakeTimer>, // TODO: maybe make new timer type "RaDriverTimer" to emit more precise error?
+    ra_timer: StaticTimer<RaTimer>,
     ack_timer: StaticTimer<AckTimer>,
     dat_timer: DynamicTimer<DatTimer>,
     sc_interface: Arc<Mutex<SecureChannelInterface>>,
     daps_driver: Arc<dyn DapsDriver + Send + Sync>,
-    prover_registry: Arc<RatRegistry>,
-    verifier_registry: Arc<RatRegistry>,
+    prover_registry: Arc<RaRegistry>,
+    verifier_registry: Arc<RaRegistry>,
     idscp_connection: Weak<Mutex<InnerIdscp2connection>>,
     connection_available_var: Arc<(Mutex<bool>, Condvar)>, //wait until connection is available
     handshake_cond: Arc<(Mutex<HandshakeResult>, Condvar)>, //handshake result to notify upper layer
     handshake_result_available: bool,
-    rat_config: AttestationConfig,
+    ra_config: AttestationConfig,
     ack_flag: AckFlag,
     expected_alternating_bit: AlternatingBit,
     next_send_alternating_bit: AlternatingBit,
@@ -177,30 +177,30 @@ pub(crate) struct FiniteStateMachine {
 impl FiniteStateMachine {
     pub fn create(
         secure_channel: Arc<dyn SecureChannel + Send + Sync>,
-        prover_registry: RatRegistry,
-        verifier_registry: RatRegistry,
+        prover_registry: RaRegistry,
+        verifier_registry: RaRegistry,
         daps_driver: Arc<dyn DapsDriver + Send + Sync>,
         handshake_cond: Arc<(Mutex<HandshakeResult>, Condvar)>,
         handshake_timeout: Duration,
         ack_timeout: Duration,
-        rat_config: AttestationConfig,
+        ra_config: AttestationConfig,
     ) -> Arc<Mutex<FiniteStateMachine>> {
         let peer_cert = secure_channel.get_peer_certificate();
-        let prover: Arc<Mutex<RatDriverInterface<RatProver>>> =
-            RatDriverInterface::create(peer_cert.clone());
-        let verifier: Arc<Mutex<RatDriverInterface<RatVerifier>>> =
-            RatDriverInterface::create(peer_cert);
+        let prover: Arc<Mutex<RaDriverInterface<RaProver>>> =
+            RaDriverInterface::create(peer_cert.clone());
+        let verifier: Arc<Mutex<RaDriverInterface<RaVerifier>>> =
+            RaDriverInterface::create(peer_cert);
         let sc_interface = SecureChannelInterface::create();
 
         //create fsm in arc mutex for multi-threaded mutable access
         let fsm = Arc::new(Mutex::new(FiniteStateMachine {
-            rat_prover: Arc::clone(&prover),
-            rat_verifier: Arc::clone(&verifier),
+            ra_prover: Arc::clone(&prover),
+            ra_verifier: Arc::clone(&verifier),
             current_state: FsmState::Closed(ClosedStateStatus::Unlocked),
             handshake_timer: StaticTimer::new(handshake_timeout),
             prover_timer: StaticTimer::new(handshake_timeout),
             verifier_timer: StaticTimer::new(handshake_timeout),
-            rat_timer: StaticTimer::new(rat_config.rat_timeout),
+            ra_timer: StaticTimer::new(ra_config.ra_timeout),
             dat_timer: DynamicTimer::new(),
             sc_interface: Arc::clone(&sc_interface),
             daps_driver,
@@ -210,7 +210,7 @@ impl FiniteStateMachine {
             connection_available_var: Arc::new((Mutex::new(false), Condvar::new())),
             handshake_cond,
             handshake_result_available: false,
-            rat_config,
+            ra_config,
             ack_flag: AckFlag::Inactive,
             ack_timer: StaticTimer::new(ack_timeout),
             expected_alternating_bit: AlternatingBit::new(),
@@ -231,7 +231,7 @@ impl FiniteStateMachine {
             (*guard).prover_timer.set_fsm(Arc::downgrade(&fsm));
             (*guard).verifier_timer.set_fsm(Arc::downgrade(&fsm));
             (*guard).dat_timer.set_fsm(Arc::downgrade(&fsm));
-            (*guard).rat_timer.set_fsm(Arc::downgrade(&fsm));
+            (*guard).ra_timer.set_fsm(Arc::downgrade(&fsm));
             (*guard).ack_timer.set_fsm(Arc::downgrade(&fsm));
         }
         fsm
@@ -320,7 +320,7 @@ impl FiniteStateMachine {
                             }
                         }
 
-                        FromUpper(UserEvent::RepeatRat)
+                        FromUpper(UserEvent::RepeatRa)
                         | FromUpper(UserEvent::Data(_))
                         | FromUpper(UserEvent::Stop) => {
                             log::warn!(
@@ -349,8 +349,8 @@ impl FiniteStateMachine {
                     res = Err(FsmError::NotConnected);
                 }
 
-                FromUpper(UserEvent::RepeatRat) => {
-                    //nothing to do, res should be OK(()) since Rat will be done in the next state
+                FromUpper(UserEvent::RepeatRa) => {
+                    //nothing to do, res should be OK(()) since RA will be done in the next state
                     // for the first time
                 }
 
@@ -385,7 +385,7 @@ impl FiniteStateMachine {
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = FsmState::WaitForRat;
+                            self.current_state = FsmState::WaitForRa;
                         }
                     },
 
@@ -404,7 +404,7 @@ impl FiniteStateMachine {
                 }
             },
 
-            WaitForRat => match event {
+            WaitForRa => match event {
                 FromUpper(UserEvent::Stop) => {
                     self.action_stop();
                     self.cleanup();
@@ -416,8 +416,8 @@ impl FiniteStateMachine {
                     res = Err(FsmError::NotConnected);
                 }
 
-                FromUpper(UserEvent::RepeatRat) => {
-                    //nothing to do, res should be OK(()) since Rat will be done in the next state
+                FromUpper(UserEvent::RepeatRa) => {
+                    //nothing to do, res should be OK(()) since RA will be done in the next state
                     // for the first time
                 }
 
@@ -438,27 +438,27 @@ impl FiniteStateMachine {
                     }
                     Ok(_) => {
                         self.handshake_timer.start();
-                        self.current_state = WaitForDatAndRat;
+                        self.current_state = WaitForDatAndRa;
                     }
                 },
 
-                FromRatProver(msg) => match msg {
-                    RatMessage::ControlMessage(RatIcm::OK) => {
-                        log::debug!("Received RatProverOK");
+                FromRaProver(msg) => match msg {
+                    RaMessage::ControlMessage(RaIcm::OK) => {
+                        log::debug!("Received RaProverOK");
                         self.prover_timer.cancel();
-                        self.current_state = WaitForRatVerifier;
+                        self.current_state = WaitForRaVerifier;
                     }
 
-                    RatMessage::ControlMessage(RatIcm::Failed) => {
-                        self.action_rat_prover_failed();
+                    RaMessage::ControlMessage(RaIcm::Failed) => {
+                        self.action_ra_prover_failed();
                         self.cleanup();
                         self.notify_connection_about_close();
                         self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                     }
 
-                    RatMessage::RawData(data) => match self.action_rat_prover_data(data) {
+                    RaMessage::RawData(data) => match self.action_ra_prover_data(data) {
                         Err(e) => {
-                            log::warn!("Cannot send RatProver msg");
+                            log::warn!("Cannot send RaProver msg");
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -468,24 +468,24 @@ impl FiniteStateMachine {
                     },
                 },
 
-                FromRatVerifier(msg) => match msg {
-                    RatMessage::ControlMessage(RatIcm::OK) => {
-                        log::debug!("Received RatVerifierOk");
+                FromRaVerifier(msg) => match msg {
+                    RaMessage::ControlMessage(RaIcm::OK) => {
+                        log::debug!("Received RaVerifierOk");
                         self.verifier_timer.cancel();
-                        self.rat_timer.start();
-                        self.current_state = WaitForRatProver;
+                        self.ra_timer.start();
+                        self.current_state = WaitForRaProver;
                     }
 
-                    RatMessage::ControlMessage(RatIcm::Failed) => {
-                        self.action_rat_verifier_failed();
+                    RaMessage::ControlMessage(RaIcm::Failed) => {
+                        self.action_ra_verifier_failed();
                         self.cleanup();
                         self.notify_connection_about_close();
                         self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                     }
 
-                    RatMessage::RawData(data) => match self.action_rat_verifier_data(data) {
+                    RaMessage::RawData(data) => match self.action_ra_verifier_data(data) {
                         Err(e) => {
-                            log::warn!("Cannot send RatVerifier msg");
+                            log::warn!("Cannot send RaVerifier msg");
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -519,13 +519,13 @@ impl FiniteStateMachine {
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = WaitForRat;
+                            self.current_state = WaitForRa;
                         }
                     },
 
-                    SecureChannelEvent::RatProver(data) => {
-                        if let Err(e) = self.action_delegate_rat_prover(data) {
-                            log::warn!("Cannot delegate RatProver msg to RatVerifier: {}", e);
+                    SecureChannelEvent::RaProver(data) => {
+                        if let Err(e) = self.action_delegate_ra_prover(data) {
+                            log::warn!("Cannot delegate RaProver msg to RaVerifier: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -533,9 +533,9 @@ impl FiniteStateMachine {
                         }
                     }
 
-                    SecureChannelEvent::RatVerifier(data) => {
-                        if let Err(e) = self.action_delegate_rat_verifier(data) {
-                            log::warn!("Cannot delegate RatVerifier msg to RatProver: {}", e);
+                    SecureChannelEvent::RaVerifier(data) => {
+                        if let Err(e) = self.action_delegate_ra_verifier(data) {
+                            log::warn!("Cannot delegate RaVerifier msg to RaProver: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -556,18 +556,18 @@ impl FiniteStateMachine {
                     }
 
                     _ => {
-                        log::warn!("No transition available, stay in state WaitForRat");
+                        log::warn!("No transition available, stay in state WaitForRa");
                         res = Err(FsmError::UnknownTransition);
                     }
                 },
 
                 _ => {
-                    log::warn!("No transition available, stay in state WaitForRat");
+                    log::warn!("No transition available, stay in state WaitForRa");
                     res = Err(FsmError::UnknownTransition);
                 }
             },
 
-            WaitForRatProver => match event {
+            WaitForRaProver => match event {
                 FromUpper(UserEvent::Stop) => {
                     self.action_stop();
                     self.cleanup();
@@ -575,16 +575,16 @@ impl FiniteStateMachine {
                     self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                 }
 
-                FromUpper(UserEvent::RepeatRat) | RatTimeout => match self.action_re_rat() {
+                FromUpper(UserEvent::RepeatRa) | RaTimeout => match self.action_re_ra() {
                     Err(e) => {
-                        log::warn!("Error occurred during re_rat handling: {}", e);
+                        log::warn!("Error occurred during re_ra handling: {}", e);
                         self.cleanup();
                         self.notify_connection_about_close(); // inspected: no deadlock, asynchronous notification to the connection
                         self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                         res = Err(e);
                     }
 
-                    Ok(_) => self.current_state = FsmState::WaitForRat,
+                    Ok(_) => self.current_state = FsmState::WaitForRa,
                 },
 
                 FromUpper(UserEvent::Data(_)) => {
@@ -608,13 +608,13 @@ impl FiniteStateMachine {
                     }
                     Ok(_) => {
                         self.handshake_timer.start();
-                        self.current_state = WaitForDatAndRat;
+                        self.current_state = WaitForDatAndRa;
                     }
                 },
 
-                FromRatProver(msg) => match msg {
-                    RatMessage::ControlMessage(RatIcm::OK) => {
-                        log::debug!("Received RatProverOK");
+                FromRaProver(msg) => match msg {
+                    RaMessage::ControlMessage(RaIcm::OK) => {
+                        log::debug!("Received RaProverOK");
                         self.prover_timer.cancel();
                         self.current_state = match self.ack_flag {
                             AckFlag::Inactive => Established,
@@ -625,16 +625,16 @@ impl FiniteStateMachine {
                         };
                     }
 
-                    RatMessage::ControlMessage(RatIcm::Failed) => {
-                        self.action_rat_prover_failed();
+                    RaMessage::ControlMessage(RaIcm::Failed) => {
+                        self.action_ra_prover_failed();
                         self.cleanup();
                         self.notify_connection_about_close();
                         self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                     }
 
-                    RatMessage::RawData(data) => match self.action_rat_prover_data(data) {
+                    RaMessage::RawData(data) => match self.action_ra_prover_data(data) {
                         Err(e) => {
-                            log::warn!("Cannot send RatProver msg");
+                            log::warn!("Cannot send RaProver msg");
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -668,26 +668,26 @@ impl FiniteStateMachine {
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = WaitForRatProver;
+                            self.current_state = WaitForRaProver;
                         }
                     },
 
-                    SecureChannelEvent::ReRat(data) => match self.action_recv_re_rat(data) {
+                    SecureChannelEvent::ReRa(data) => match self.action_recv_re_ra(data) {
                         Err(e) => {
-                            log::warn!("Error occurred during receiving re_rat: {}", e);
+                            log::warn!("Error occurred during receiving re_ra: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = FsmState::WaitForRatProver;
+                            self.current_state = FsmState::WaitForRaProver;
                         }
                     },
 
-                    SecureChannelEvent::RatVerifier(data) => {
-                        if let Err(e) = self.action_delegate_rat_verifier(data) {
-                            log::warn!("Cannot delegate RatVerifier msg to RatProver: {}", e);
+                    SecureChannelEvent::RaVerifier(data) => {
+                        if let Err(e) = self.action_delegate_ra_verifier(data) {
+                            log::warn!("Cannot delegate RaVerifier msg to RaProver: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -708,18 +708,18 @@ impl FiniteStateMachine {
                     }
 
                     _ => {
-                        log::warn!("No transition available, stay in state WaitForRatProver");
+                        log::warn!("No transition available, stay in state WaitForRaProver");
                         res = Err(FsmError::UnknownTransition);
                     }
                 },
 
                 _ => {
-                    log::warn!("No transition available, stay in state WaitForRatProver");
+                    log::warn!("No transition available, stay in state WaitForRaProver");
                     res = Err(FsmError::UnknownTransition);
                 }
             },
 
-            WaitForRatVerifier => match event {
+            WaitForRaVerifier => match event {
                 FromUpper(UserEvent::Stop) => {
                     self.action_stop();
                     self.cleanup();
@@ -731,8 +731,8 @@ impl FiniteStateMachine {
                     res = Err(FsmError::NotConnected);
                 }
 
-                FromUpper(UserEvent::RepeatRat) => {
-                    //nothing to do, res should be OK(()) since Rat will be done in the next state
+                FromUpper(UserEvent::RepeatRa) => {
+                    //nothing to do, res should be OK(()) since Ra will be done in the next state
                     // for the first time
                 }
 
@@ -753,15 +753,15 @@ impl FiniteStateMachine {
                     }
                     Ok(_) => {
                         self.handshake_timer.start();
-                        self.current_state = WaitForDatAndRatVerifier;
+                        self.current_state = WaitForDatAndRaVerifier;
                     }
                 },
 
-                FromRatVerifier(msg) => match msg {
-                    RatMessage::ControlMessage(RatIcm::OK) => {
-                        log::debug!("Received RatVerifierOk");
+                FromRaVerifier(msg) => match msg {
+                    RaMessage::ControlMessage(RaIcm::OK) => {
+                        log::debug!("Received RaVerifierOk");
                         self.verifier_timer.cancel();
-                        self.rat_timer.start();
+                        self.ra_timer.start();
                         self.current_state = match self.ack_flag {
                             AckFlag::Inactive => Established,
                             AckFlag::Active(_) => {
@@ -771,16 +771,16 @@ impl FiniteStateMachine {
                         };
                     }
 
-                    RatMessage::ControlMessage(RatIcm::Failed) => {
-                        self.action_rat_verifier_failed();
+                    RaMessage::ControlMessage(RaIcm::Failed) => {
+                        self.action_ra_verifier_failed();
                         self.cleanup();
                         self.notify_connection_about_close();
                         self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                     }
 
-                    RatMessage::RawData(data) => match self.action_rat_verifier_data(data) {
+                    RaMessage::RawData(data) => match self.action_ra_verifier_data(data) {
                         Err(e) => {
-                            log::warn!("Cannot send RatVerifier msg");
+                            log::warn!("Cannot send RaVerifier msg");
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -814,13 +814,13 @@ impl FiniteStateMachine {
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = WaitForRat;
+                            self.current_state = WaitForRa;
                         }
                     },
 
-                    SecureChannelEvent::RatProver(data) => {
-                        if let Err(e) = self.action_delegate_rat_prover(data) {
-                            log::warn!("Cannot delegate RatProver msg to RatVerifier: {}", e);
+                    SecureChannelEvent::RaProver(data) => {
+                        if let Err(e) = self.action_delegate_ra_prover(data) {
+                            log::warn!("Cannot delegate RaProver msg to RaVerifier: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -828,16 +828,16 @@ impl FiniteStateMachine {
                         }
                     }
 
-                    SecureChannelEvent::ReRat(data) => match self.action_recv_re_rat(data) {
+                    SecureChannelEvent::ReRa(data) => match self.action_recv_re_ra(data) {
                         Err(e) => {
-                            log::warn!("Error occurred during receiving re_rat: {}", e);
+                            log::warn!("Error occurred during receiving re_ra: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = FsmState::WaitForRat;
+                            self.current_state = FsmState::WaitForRa;
                         }
                     },
 
@@ -854,18 +854,18 @@ impl FiniteStateMachine {
                     }
 
                     _ => {
-                        log::warn!("No transition available, stay in state WaitForRatVerifier");
+                        log::warn!("No transition available, stay in state WaitForRaVerifier");
                         res = Err(FsmError::UnknownTransition);
                     }
                 },
 
                 _ => {
-                    log::warn!("No transition available, stay in state WaitForRatVerifier");
+                    log::warn!("No transition available, stay in state WaitForRaVerifier");
                     res = Err(FsmError::UnknownTransition);
                 }
             },
 
-            WaitForDatAndRat => match event {
+            WaitForDatAndRa => match event {
                 FromUpper(UserEvent::Stop) => {
                     self.action_stop();
                     self.cleanup();
@@ -877,8 +877,8 @@ impl FiniteStateMachine {
                     res = Err(FsmError::NotConnected);
                 }
 
-                FromUpper(UserEvent::RepeatRat) => {
-                    //nothing to do, res should be OK(()) since Rat will be done in the next state
+                FromUpper(UserEvent::RepeatRa) => {
+                    //nothing to do, res should be OK(()) since Ra will be done in the next state
                     // for the first time
                 }
 
@@ -889,23 +889,23 @@ impl FiniteStateMachine {
                     self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                 }
 
-                FromRatProver(msg) => match msg {
-                    RatMessage::ControlMessage(RatIcm::OK) => {
-                        log::debug!("Received RatProverOK");
+                FromRaProver(msg) => match msg {
+                    RaMessage::ControlMessage(RaIcm::OK) => {
+                        log::debug!("Received RaProverOK");
                         self.prover_timer.cancel();
-                        self.current_state = WaitForDatAndRatVerifier;
+                        self.current_state = WaitForDatAndRaVerifier;
                     }
 
-                    RatMessage::ControlMessage(RatIcm::Failed) => {
-                        self.action_rat_prover_failed();
+                    RaMessage::ControlMessage(RaIcm::Failed) => {
+                        self.action_ra_prover_failed();
                         self.cleanup();
                         self.notify_connection_about_close();
                         self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                     }
 
-                    RatMessage::RawData(data) => match self.action_rat_prover_data(data) {
+                    RaMessage::RawData(data) => match self.action_ra_prover_data(data) {
                         Err(e) => {
-                            log::warn!("Cannot send RatProver msg");
+                            log::warn!("Cannot send RaProver msg");
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -939,7 +939,7 @@ impl FiniteStateMachine {
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = WaitForDatAndRat;
+                            self.current_state = WaitForDatAndRa;
                         }
                     },
 
@@ -952,13 +952,13 @@ impl FiniteStateMachine {
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = FsmState::WaitForRat;
+                            self.current_state = FsmState::WaitForRa;
                         }
                     },
 
-                    SecureChannelEvent::RatVerifier(data) => {
-                        if let Err(e) = self.action_delegate_rat_verifier(data) {
-                            log::warn!("Cannot delegate RatVerifier msg to RatProver: {}", e);
+                    SecureChannelEvent::RaVerifier(data) => {
+                        if let Err(e) = self.action_delegate_ra_verifier(data) {
+                            log::warn!("Cannot delegate RaVerifier msg to RaProver: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -966,16 +966,16 @@ impl FiniteStateMachine {
                         }
                     }
 
-                    SecureChannelEvent::ReRat(data) => match self.action_recv_re_rat(data) {
+                    SecureChannelEvent::ReRa(data) => match self.action_recv_re_ra(data) {
                         Err(e) => {
-                            log::warn!("Error occurred during receiving re_rat: {}", e);
+                            log::warn!("Error occurred during receiving re_ra: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = FsmState::WaitForDatAndRat;
+                            self.current_state = FsmState::WaitForDatAndRa;
                         }
                     },
 
@@ -992,18 +992,18 @@ impl FiniteStateMachine {
                     }
 
                     _ => {
-                        log::warn!("No transition available, stay in state WaitForDatAndRat");
+                        log::warn!("No transition available, stay in state WaitForDatAndRa");
                         res = Err(FsmError::UnknownTransition);
                     }
                 },
 
                 _ => {
-                    log::warn!("No transition available, stay in state WaitForDatAndRat");
+                    log::warn!("No transition available, stay in state WaitForDatAndRa");
                     res = Err(FsmError::UnknownTransition);
                 }
             },
 
-            WaitForDatAndRatVerifier => match event {
+            WaitForDatAndRaVerifier => match event {
                 FromUpper(UserEvent::Stop) => {
                     self.action_stop();
                     self.cleanup();
@@ -1015,8 +1015,8 @@ impl FiniteStateMachine {
                     res = Err(FsmError::NotConnected);
                 }
 
-                FromUpper(UserEvent::RepeatRat) => {
-                    //nothing to do, res should be OK(()) since Rat will be done in the next state
+                FromUpper(UserEvent::RepeatRa) => {
+                    //nothing to do, res should be OK(()) since RA will be done in the next state
                     // for the first time
                 }
 
@@ -1051,7 +1051,7 @@ impl FiniteStateMachine {
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = WaitForDatAndRat;
+                            self.current_state = WaitForDatAndRa;
                         }
                     },
 
@@ -1064,20 +1064,20 @@ impl FiniteStateMachine {
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = FsmState::WaitForRatVerifier;
+                            self.current_state = FsmState::WaitForRaVerifier;
                         }
                     },
 
-                    SecureChannelEvent::ReRat(data) => match self.action_recv_re_rat(data) {
+                    SecureChannelEvent::ReRa(data) => match self.action_recv_re_ra(data) {
                         Err(e) => {
-                            log::warn!("Error occurred during receiving re_rat: {}", e);
+                            log::warn!("Error occurred during receiving re_ra: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close();
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                             res = Err(e);
                         }
                         Ok(_) => {
-                            self.current_state = FsmState::WaitForDatAndRat;
+                            self.current_state = FsmState::WaitForDatAndRa;
                         }
                     },
 
@@ -1095,14 +1095,14 @@ impl FiniteStateMachine {
 
                     _ => {
                         log::warn!(
-                            "No transition available, stay in state WaitForDatAndRatVerifier"
+                            "No transition available, stay in state WaitForDatAndRaVerifier"
                         );
                         res = Err(FsmError::UnknownTransition);
                     }
                 },
 
                 _ => {
-                    log::warn!("No transition available, stay in state WaitForDatAndRatVerifier");
+                    log::warn!("No transition available, stay in state WaitForDatAndRaVerifier");
                     res = Err(FsmError::UnknownTransition);
                 }
             },
@@ -1117,9 +1117,9 @@ impl FiniteStateMachine {
                         self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                     }
 
-                    FromUpper(UserEvent::RepeatRat) | RatTimeout => match self.action_re_rat() {
+                    FromUpper(UserEvent::RepeatRa) | RaTimeout => match self.action_re_ra() {
                         Err(e) => {
-                            log::warn!("Error occurred during re_rat handling: {}", e);
+                            log::warn!("Error occurred during re_ra handling: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close(); // inspected: no deadlock, asynchronous notification to the connection
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -1128,7 +1128,7 @@ impl FiniteStateMachine {
 
                         Ok(_) => {
                             self.ack_timer.cancel();
-                            self.current_state = FsmState::WaitForRatVerifier
+                            self.current_state = FsmState::WaitForRaVerifier
                         }
                     },
 
@@ -1149,7 +1149,7 @@ impl FiniteStateMachine {
                         Ok(_) => {
                             self.ack_timer.cancel();
                             self.handshake_timer.start();
-                            self.current_state = WaitForDatAndRatVerifier;
+                            self.current_state = WaitForDatAndRaVerifier;
                         }
                     },
 
@@ -1197,13 +1197,13 @@ impl FiniteStateMachine {
                             }
                             Ok(_) => {
                                 self.ack_timer.cancel();
-                                self.current_state = WaitForRatProver;
+                                self.current_state = WaitForRaProver;
                             }
                         },
 
-                        SecureChannelEvent::ReRat(data) => match self.action_recv_re_rat(data) {
+                        SecureChannelEvent::ReRa(data) => match self.action_recv_re_ra(data) {
                             Err(e) => {
-                                log::warn!("Error occurred during receiving re_rat: {}", e);
+                                log::warn!("Error occurred during receiving re_ra: {}", e);
                                 self.cleanup();
                                 self.notify_connection_about_close();
                                 self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
@@ -1211,7 +1211,7 @@ impl FiniteStateMachine {
                             }
                             Ok(_) => {
                                 self.ack_timer.cancel();
-                                self.current_state = FsmState::WaitForRatProver;
+                                self.current_state = FsmState::WaitForRaProver;
                             }
                         },
 
@@ -1250,16 +1250,16 @@ impl FiniteStateMachine {
                         self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                     }
 
-                    FromUpper(UserEvent::RepeatRat) | RatTimeout => match self.action_re_rat() {
+                    FromUpper(UserEvent::RepeatRa) | RaTimeout => match self.action_re_ra() {
                         Err(e) => {
-                            log::warn!("Error occurred during re_rat handling: {}", e);
+                            log::warn!("Error occurred during re_ra handling: {}", e);
                             self.cleanup();
                             self.notify_connection_about_close(); // inspected: no deadlock, asynchronous notification to the connection
                             self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                             res = Err(e);
                         }
 
-                        Ok(_) => self.current_state = FsmState::WaitForRatVerifier,
+                        Ok(_) => self.current_state = FsmState::WaitForRaVerifier,
                     },
 
                     FromUpper(UserEvent::Data(msg)) => {
@@ -1290,7 +1290,7 @@ impl FiniteStateMachine {
                         }
                         Ok(_) => {
                             self.handshake_timer.start();
-                            self.current_state = WaitForDatAndRatVerifier;
+                            self.current_state = WaitForDatAndRaVerifier;
                         }
                     },
 
@@ -1318,20 +1318,20 @@ impl FiniteStateMachine {
                                 res = Err(e);
                             }
                             Ok(_) => {
-                                self.current_state = WaitForRatProver;
+                                self.current_state = WaitForRaProver;
                             }
                         },
 
-                        SecureChannelEvent::ReRat(data) => match self.action_recv_re_rat(data) {
+                        SecureChannelEvent::ReRa(data) => match self.action_recv_re_ra(data) {
                             Err(e) => {
-                                log::warn!("Error occurred during receiving re_rat: {}", e);
+                                log::warn!("Error occurred during receiving re_ra: {}", e);
                                 self.cleanup();
                                 self.notify_connection_about_close();
                                 self.current_state = FsmState::Closed(ClosedStateStatus::Locked);
                                 res = Err(e);
                             }
                             Ok(_) => {
-                                self.current_state = FsmState::WaitForRatProver;
+                                self.current_state = FsmState::WaitForRaProver;
                             }
                         },
 
@@ -1406,8 +1406,8 @@ impl FiniteStateMachine {
         //create idscp_hello msg
         let idscp_hello = idscp_message_factory::create_idscp_hello(
             dat.into_bytes(),
-            &self.rat_config.expected_attestation_suite,
-            &self.rat_config.supported_attestation_suite,
+            &self.ra_config.expected_attestation_suite,
+            &self.ra_config.supported_attestation_suite,
         );
 
         //send idscp hello via secure channel
@@ -1421,8 +1421,8 @@ impl FiniteStateMachine {
 
     fn dat_timeout_handler(&mut self) -> Result<(), FsmError> {
         log::debug!("Dat timeout occurred. Send IdscpDatExpired");
-        self.rat_verifier.lock().unwrap().stop_driver();
-        self.rat_timer.cancel();
+        self.ra_verifier.lock().unwrap().stop_driver();
+        self.ra_timer.cancel();
 
         //send IdscpDatExpired
         let idscp_dat_exp = idscp_message_factory::create_idscp_dat_exp();
@@ -1465,11 +1465,11 @@ impl FiniteStateMachine {
         }
     }
 
-    fn calculate_rat_algorithms<'a>(
+    fn calculate_ra_algorithms<'a>(
         primary: &'a [String],
         secondary: &'a [String],
-    ) -> Result<&'a str, RatNegotiationError> {
-        log::debug!("Calculate Rat mechanisms");
+    ) -> Result<&'a str, RaNegotiationError> {
+        log::debug!("Calculate RA mechanisms");
         for p in primary {
             for s in secondary {
                 if p.eq(s) {
@@ -1477,42 +1477,42 @@ impl FiniteStateMachine {
                 }
             }
         }
-        Err(RatNegotiationError::NoRatMechanismMatch)
+        Err(RaNegotiationError::NoRaMechanismMatch)
     }
 
-    fn calculate_rat_verifier_mechanism<'a>(
-        peer_rat_supported_suites: &'a [String],
-        own_rat_expected_suites: &'a [String],
-    ) -> Result<&'a str, RatNegotiationError> {
-        if peer_rat_supported_suites.is_empty() {
-            log::error!("peer has no rat prover suites available");
-            return Err(RatNegotiationError::NoRatMechanismMatch);
+    fn calculate_ra_verifier_mechanism<'a>(
+        peer_ra_supported_suites: &'a [String],
+        own_ra_expected_suites: &'a [String],
+    ) -> Result<&'a str, RaNegotiationError> {
+        if peer_ra_supported_suites.is_empty() {
+            log::error!("peer has no RA prover suites available");
+            return Err(RaNegotiationError::NoRaMechanismMatch);
         }
-        if own_rat_expected_suites.is_empty() {
-            log::error!("own has no rat verifier suites available");
-            return Err(RatNegotiationError::NoRatMechanismMatch);
+        if own_ra_expected_suites.is_empty() {
+            log::error!("own has no RA verifier suites available");
+            return Err(RaNegotiationError::NoRaMechanismMatch);
         }
-        FiniteStateMachine::calculate_rat_algorithms(
-            own_rat_expected_suites,
-            peer_rat_supported_suites,
+        FiniteStateMachine::calculate_ra_algorithms(
+            own_ra_expected_suites,
+            peer_ra_supported_suites,
         )
     }
 
-    fn calculate_rat_prover_mechanism<'a>(
-        peer_rat_expected_suites: &'a [String],
-        own_rat_supported_suites: &'a [String],
-    ) -> Result<&'a str, RatNegotiationError> {
-        if peer_rat_expected_suites.is_empty() {
-            log::error!("peer has no rat verifier suites available");
-            return Err(RatNegotiationError::NoRatMechanismMatch);
+    fn calculate_ra_prover_mechanism<'a>(
+        peer_ra_expected_suites: &'a [String],
+        own_ra_supported_suites: &'a [String],
+    ) -> Result<&'a str, RaNegotiationError> {
+        if peer_ra_expected_suites.is_empty() {
+            log::error!("peer has no RA verifier suites available");
+            return Err(RaNegotiationError::NoRaMechanismMatch);
         }
-        if own_rat_supported_suites.is_empty() {
-            log::error!("own has no rat prover suites available");
-            return Err(RatNegotiationError::NoRatMechanismMatch);
+        if own_ra_supported_suites.is_empty() {
+            log::error!("own has no RA prover suites available");
+            return Err(RaNegotiationError::NoRaMechanismMatch);
         }
-        FiniteStateMachine::calculate_rat_algorithms(
-            peer_rat_expected_suites,
-            own_rat_supported_suites,
+        FiniteStateMachine::calculate_ra_algorithms(
+            peer_ra_expected_suites,
+            own_ra_supported_suites,
         )
     }
 
@@ -1520,16 +1520,16 @@ impl FiniteStateMachine {
         log::debug!("IdscpHello received");
         self.handshake_timer.cancel();
 
-        let own_supported_provers = &self.rat_config.supported_attestation_suite;
-        let peer_expected = hello.get_expectedRatSuite().to_vec();
-        let prover_mechanism = FiniteStateMachine::calculate_rat_prover_mechanism(
+        let own_supported_provers = &self.ra_config.supported_attestation_suite;
+        let peer_expected = hello.get_expectedRaSuite().to_vec();
+        let prover_mechanism = FiniteStateMachine::calculate_ra_prover_mechanism(
             &peer_expected,
             &own_supported_provers,
         )?;
 
-        let own_expected_verifiers = &self.rat_config.expected_attestation_suite;
-        let peer_supported = hello.get_supportedRatSuite().to_vec();
-        let verifier_mechanism = FiniteStateMachine::calculate_rat_verifier_mechanism(
+        let own_expected_verifiers = &self.ra_config.expected_attestation_suite;
+        let peer_supported = hello.get_supportedRaSuite().to_vec();
+        let verifier_mechanism = FiniteStateMachine::calculate_ra_verifier_mechanism(
             &peer_supported,
             &own_expected_verifiers,
         )?;
@@ -1574,28 +1574,28 @@ impl FiniteStateMachine {
             }
         }
 
-        // start rat verifier
-        log::debug!("Start rat prover and verifier");
-        let mut verifier_guard = self.rat_verifier.lock().unwrap();
+        // start ra verifier
+        log::debug!("Start ra prover and verifier");
+        let mut verifier_guard = self.ra_verifier.lock().unwrap();
         if let Err(e) = (*verifier_guard).start_driver(
             &verifier_mechanism,
             Arc::downgrade(&self.verifier_registry),
-            Arc::clone(&self.rat_verifier),
+            Arc::clone(&self.ra_verifier),
         ) {
-            log::error!("Cannot start RatVerifier driver");
-            return Err(FsmError::RatError(e));
+            log::error!("Cannot start RaVerifier driver");
+            return Err(FsmError::RaError(e));
         }
         self.verifier_timer.start();
 
-        // start rat prover
-        let mut prover_guard = self.rat_prover.lock().unwrap();
+        // start ra prover
+        let mut prover_guard = self.ra_prover.lock().unwrap();
         if let Err(e) = (*prover_guard).start_driver(
             &prover_mechanism,
             Arc::downgrade(&self.prover_registry),
-            Arc::clone(&self.rat_prover),
+            Arc::clone(&self.ra_prover),
         ) {
-            log::error!("Cannot start RatProver driver");
-            return Err(FsmError::RatError(e));
+            log::error!("Cannot start RaProver driver");
+            return Err(FsmError::RaError(e));
         }
         self.prover_timer.start();
 
@@ -1672,63 +1672,63 @@ impl FiniteStateMachine {
         }
     }
 
-    fn action_re_rat(&mut self) -> Result<(), FsmError> {
-        log::debug!("Repeat Rat. Send IdscpReRat and start RatVerifier");
-        self.rat_timer.cancel();
+    fn action_re_ra(&mut self) -> Result<(), FsmError> {
+        log::debug!("Repeat RA. Send IdscpReRa and start RaVerifier");
+        self.ra_timer.cancel();
 
-        //send idscp re-rat
-        let idscp_rerat = idscp_message_factory::create_idscp_re_rat("");
+        //send idscp re-ra
+        let idscp_rera = idscp_message_factory::create_idscp_re_ra("");
         let mut raw = Vec::new();
-        let _ = idscp_rerat.write_to_vec(&mut raw);
+        let _ = idscp_rera.write_to_vec(&mut raw);
         if let Err(e) = self.sc_interface.lock().unwrap().write(raw) {
             return Err(FsmError::IoError(e));
         }
 
         //start verifier
-        let mut verifier_guard = self.rat_verifier.lock().unwrap();
-        if let Err(e) = (*verifier_guard).restart_driver(Arc::clone(&self.rat_verifier)) {
-            log::error!("Cannot restart RatVerifier driver");
-            return Err(FsmError::RatError(e));
+        let mut verifier_guard = self.ra_verifier.lock().unwrap();
+        if let Err(e) = (*verifier_guard).restart_driver(Arc::clone(&self.ra_verifier)) {
+            log::error!("Cannot restart RaVerifier driver");
+            return Err(FsmError::RaError(e));
         }
         self.verifier_timer.start();
         Ok(())
     }
 
-    fn action_recv_re_rat(&mut self, _data: IdscpReRat) -> Result<(), FsmError> {
+    fn action_recv_re_ra(&mut self, _data: IdscpReRa) -> Result<(), FsmError> {
         log::debug!(
-            "Received IdscpReRat with cause: {}. Start RatProver",
+            "Received IdscpReRa with cause: {}. Start RaProver",
             _data.cause
         );
 
-        let mut prover_guard = self.rat_prover.lock().unwrap();
-        if let Err(e) = (*prover_guard).restart_driver(Arc::clone(&self.rat_prover)) {
-            log::error!("Cannot restart RatProver driver");
-            return Err(FsmError::RatError(e));
+        let mut prover_guard = self.ra_prover.lock().unwrap();
+        if let Err(e) = (*prover_guard).restart_driver(Arc::clone(&self.ra_prover)) {
+            log::error!("Cannot restart RaProver driver");
+            return Err(FsmError::RaError(e));
         }
         self.prover_timer.start();
 
         Ok(())
     }
 
-    fn action_rat_prover_failed(&mut self) {
-        log::debug!("Received RatProver Failed");
+    fn action_ra_prover_failed(&mut self) {
+        log::debug!("Received RaProver Failed");
 
         self.prover_timer.cancel();
 
         //send IdscpClose
         let idscp_close = idscp_message_factory::create_idscp_close(
-            IdscpClose_CloseCause::RAT_PROVER_FAILED,
-            "RatProver failed",
+            IdscpClose_CloseCause::RA_PROVER_FAILED,
+            "RaProver failed",
         );
         let mut data = Vec::new();
         let _ = idscp_close.write_to_vec(&mut data);
         let _ = self.sc_interface.lock().unwrap().write(data);
     }
 
-    fn action_rat_prover_data(&mut self, data: Vec<u8>) -> Result<(), FsmError> {
-        log::debug!("Send IdscpRatProver");
+    fn action_ra_prover_data(&mut self, data: Vec<u8>) -> Result<(), FsmError> {
+        log::debug!("Send IdscpRaProver");
 
-        let idscp_prover = idscp_message_factory::create_idscp_rat_prover(data);
+        let idscp_prover = idscp_message_factory::create_idscp_ra_prover(data);
         let mut raw = Vec::new();
         let _ = idscp_prover.write_to_vec(&mut raw);
         match self.sc_interface.lock().unwrap().write(raw) {
@@ -1737,25 +1737,25 @@ impl FiniteStateMachine {
         }
     }
 
-    fn action_rat_verifier_failed(&mut self) {
-        log::debug!("Received RatVerifier Failed");
+    fn action_ra_verifier_failed(&mut self) {
+        log::debug!("Received RaVerifier Failed");
 
         self.verifier_timer.cancel();
 
         //send close
         let idscp_close = idscp_message_factory::create_idscp_close(
-            IdscpClose_CloseCause::RAT_VERIFIER_FAILED,
-            "RatVerifier failed",
+            IdscpClose_CloseCause::RA_VERIFIER_FAILED,
+            "RaVerifier failed",
         );
         let mut data = Vec::new();
         let _ = idscp_close.write_to_vec(&mut data);
         let _ = self.sc_interface.lock().unwrap().write(data);
     }
 
-    fn action_rat_verifier_data(&mut self, data: Vec<u8>) -> Result<(), FsmError> {
-        log::debug!("Send IdscpRatVerifier");
+    fn action_ra_verifier_data(&mut self, data: Vec<u8>) -> Result<(), FsmError> {
+        log::debug!("Send IdscpRaVerifier");
 
-        let idscp_verifier = idscp_message_factory::create_idscp_rat_verifier(data);
+        let idscp_verifier = idscp_message_factory::create_idscp_ra_verifier(data);
         let mut raw = Vec::new();
         let _ = idscp_verifier.write_to_vec(&mut raw);
         match self.sc_interface.lock().unwrap().write(raw) {
@@ -1764,20 +1764,20 @@ impl FiniteStateMachine {
         }
     }
 
-    fn action_delegate_rat_prover(&mut self, data: IdscpRatProver) -> Result<(), FsmError> {
-        log::debug!("Delegate received RatProver msg to RatVerifier");
-        let verifier_guard = self.rat_verifier.lock().unwrap();
-        match (*verifier_guard).write_to_driver(RatMessage::RawData(data.data.to_vec())) {
-            Err(e) => Err(FsmError::RatError(e)),
+    fn action_delegate_ra_prover(&mut self, data: IdscpRaProver) -> Result<(), FsmError> {
+        log::debug!("Delegate received RaProver msg to RaVerifier");
+        let verifier_guard = self.ra_verifier.lock().unwrap();
+        match (*verifier_guard).write_to_driver(RaMessage::RawData(data.data.to_vec())) {
+            Err(e) => Err(FsmError::RaError(e)),
             Ok(_) => Ok(()),
         }
     }
 
-    fn action_delegate_rat_verifier(&mut self, data: IdscpRatVerifier) -> Result<(), FsmError> {
-        log::debug!("Delegate received RatVerifier msg to RatProver");
-        let prover_guard = self.rat_prover.lock().unwrap();
-        match (*prover_guard).write_to_driver(RatMessage::RawData(data.data.to_vec())) {
-            Err(e) => Err(FsmError::RatError(e)),
+    fn action_delegate_ra_verifier(&mut self, data: IdscpRaVerifier) -> Result<(), FsmError> {
+        log::debug!("Delegate received RaVerifier msg to RaProver");
+        let prover_guard = self.ra_prover.lock().unwrap();
+        match (*prover_guard).write_to_driver(RaMessage::RawData(data.data.to_vec())) {
+            Err(e) => Err(FsmError::RaError(e)),
             Ok(_) => Ok(()),
         }
     }
@@ -1819,11 +1819,11 @@ impl FiniteStateMachine {
             }
         }
 
-        log::debug!("Start RatVerifier");
-        let mut verifier_guard = self.rat_verifier.lock().unwrap();
-        if let Err(e) = (*verifier_guard).restart_driver(Arc::clone(&self.rat_verifier)) {
-            log::error!("Cannot restart RatVerifier driver");
-            return Err(FsmError::RatError(e));
+        log::debug!("Start RaVerifier");
+        let mut verifier_guard = self.ra_verifier.lock().unwrap();
+        if let Err(e) = (*verifier_guard).restart_driver(Arc::clone(&self.ra_verifier)) {
+            log::error!("Cannot restart RaVerifier driver");
+            return Err(FsmError::RaError(e));
         }
         self.verifier_timer.start();
 
@@ -1831,7 +1831,7 @@ impl FiniteStateMachine {
     }
 
     fn action_recv_dat_exp(&mut self) -> Result<(), FsmError> {
-        log::debug!("Receive IdscpDatExpired. Send new Dat and start RatProver");
+        log::debug!("Receive IdscpDatExpired. Send new Dat and start RaProver");
 
         //send new Dat
         let dat = self.daps_driver.get_token();
@@ -1843,10 +1843,10 @@ impl FiniteStateMachine {
             return Err(FsmError::IoError(e));
         }
 
-        let mut prover_guard = self.rat_prover.lock().unwrap();
-        if let Err(e) = (*prover_guard).restart_driver(Arc::clone(&self.rat_prover)) {
-            log::error!("Cannot restart RatProver driver");
-            return Err(FsmError::RatError(e));
+        let mut prover_guard = self.ra_prover.lock().unwrap();
+        if let Err(e) = (*prover_guard).restart_driver(Arc::clone(&self.ra_prover)) {
+            log::error!("Cannot restart RaProver driver");
+            return Err(FsmError::RaError(e));
         }
         self.prover_timer.start();
 
@@ -1856,13 +1856,13 @@ impl FiniteStateMachine {
     fn cleanup(&mut self) {
         self.handshake_timer.cancel();
         self.dat_timer.cancel();
-        self.rat_timer.cancel();
+        self.ra_timer.cancel();
         self.verifier_timer.cancel();
         self.prover_timer.cancel();
         self.ack_timer.cancel();
 
-        self.rat_prover.lock().unwrap().stop_driver();
-        self.rat_verifier.lock().unwrap().stop_driver();
+        self.ra_prover.lock().unwrap().stop_driver();
+        self.ra_verifier.lock().unwrap().stop_driver();
 
         //close secure channel
         {
@@ -1931,7 +1931,7 @@ mod tests {
     // Test Transitions //
     use super::*;
     use crate::drivers::daps_driver::DapsDriver;
-    use crate::drivers::rat_driver::RatDriver;
+    use crate::drivers::ra_driver::RaDriver;
     use crate::fsm::AckFlag::Inactive;
     use crate::messages::idscp_message_factory::*;
     use openssl::hash::MessageDigest;
@@ -1993,25 +1993,25 @@ mod tests {
         }
     }
 
-    struct RatProverDummy {}
-    struct RatVerifierDummy {}
+    struct RaProverDummy {}
+    struct RaVerifierDummy {}
 
-    impl RatDriver for RatProverDummy {
+    impl RaDriver for RaProverDummy {
         fn get_id(&self) -> &'static str {
-            "NullRat"
+            "NullRa"
         }
 
-        fn execute(&self, _tx: Sender<RatMessage>, rx: Receiver<RatMessage>, _peer_cert: X509) {
+        fn execute(&self, _tx: Sender<RaMessage>, rx: Receiver<RaMessage>, _peer_cert: X509) {
             let _ = rx.recv();
         }
     }
 
-    impl RatDriver for RatVerifierDummy {
+    impl RaDriver for RaVerifierDummy {
         fn get_id(&self) -> &'static str {
-            "NullRat"
+            "NullRa"
         }
 
-        fn execute(&self, _tx: Sender<RatMessage>, rx: Receiver<RatMessage>, _peer_cert: X509) {
+        fn execute(&self, _tx: Sender<RaMessage>, rx: Receiver<RaMessage>, _peer_cert: X509) {
             let _ = rx.recv();
         }
     }
@@ -2022,10 +2022,10 @@ mod tests {
         next_send_alternating_bit: AlternatingBit,
         expected_alternating_bit: AlternatingBit,
     ) -> Arc<Mutex<FiniteStateMachine>> {
-        let mut prover_registry = RatRegistry::new();
-        let mut verifier_registry = RatRegistry::new();
-        let prover = Arc::new(RatProverDummy {});
-        let verifier = Arc::new(RatVerifierDummy {});
+        let mut prover_registry = RaRegistry::new();
+        let mut verifier_registry = RaRegistry::new();
+        let prover = Arc::new(RaProverDummy {});
+        let verifier = Arc::new(RaVerifierDummy {});
         prover_registry.register_driver(prover);
         verifier_registry.register_driver(verifier);
         let sc = Arc::new(TestSc {});
@@ -2033,10 +2033,10 @@ mod tests {
         let handshake_cond = Arc::new((Mutex::new(HandshakeResult::NotAvailable), Condvar::new()));
         let handshake_timeout = Duration::from_millis(5000);
         let ack_timeout = Duration::from_millis(1000);
-        let rat_config = AttestationConfig {
-            supported_attestation_suite: vec!["NullRat".to_string()],
-            expected_attestation_suite: vec!["NullRat".to_string()],
-            rat_timeout: Duration::from_millis(1000),
+        let ra_config = AttestationConfig {
+            supported_attestation_suite: vec!["NullRa".to_string()],
+            expected_attestation_suite: vec!["NullRa".to_string()],
+            ra_timeout: Duration::from_millis(1000),
         };
         let fsm = FiniteStateMachine::create(
             sc,
@@ -2046,28 +2046,28 @@ mod tests {
             handshake_cond,
             handshake_timeout,
             ack_timeout,
-            rat_config,
+            ra_config,
         );
 
-        // register rat drivers in interface (this would be done via receiving hello in normal
+        // register ra drivers in interface (this would be done via receiving hello in normal
         // handshake and enables restart methods on interfaces)
-        let rat_p_interface = Arc::clone(&fsm.lock().unwrap().rat_prover);
-        let rat_v_interface = Arc::clone(&fsm.lock().unwrap().rat_verifier);
-        let rat_p_registry = Arc::downgrade(&fsm.lock().unwrap().prover_registry);
-        let rat_v_registry = Arc::downgrade(&fsm.lock().unwrap().verifier_registry);
+        let ra_p_interface = Arc::clone(&fsm.lock().unwrap().ra_prover);
+        let ra_v_interface = Arc::clone(&fsm.lock().unwrap().ra_verifier);
+        let ra_p_registry = Arc::downgrade(&fsm.lock().unwrap().prover_registry);
+        let ra_v_registry = Arc::downgrade(&fsm.lock().unwrap().verifier_registry);
 
-        let _ = fsm.lock().unwrap().rat_prover.lock().unwrap().start_driver(
-            "NullRat",
-            rat_p_registry,
-            rat_p_interface,
+        let _ = fsm.lock().unwrap().ra_prover.lock().unwrap().start_driver(
+            "NullRa",
+            ra_p_registry,
+            ra_p_interface,
         );
         let _ = fsm
             .lock()
             .unwrap()
-            .rat_verifier
+            .ra_verifier
             .lock()
             .unwrap()
-            .start_driver("NullRat", rat_v_registry, rat_v_interface);
+            .start_driver("NullRa", ra_v_registry, ra_v_interface);
 
         let mut guard = fsm.lock().unwrap();
         (*guard).set_connection(None); //set no connection to ensure process_event is not
@@ -2101,13 +2101,13 @@ mod tests {
 
             IdscpMessage_oneof_message::idscpDatExpired(data) => SecureChannelEvent::DatExp(data),
 
-            IdscpMessage_oneof_message::idscpRatProver(data) => SecureChannelEvent::RatProver(data),
+            IdscpMessage_oneof_message::idscpRaProver(data) => SecureChannelEvent::RaProver(data),
 
-            IdscpMessage_oneof_message::idscpRatVerifier(data) => {
-                SecureChannelEvent::RatVerifier(data)
+            IdscpMessage_oneof_message::idscpRaVerifier(data) => {
+                SecureChannelEvent::RaVerifier(data)
             }
 
-            IdscpMessage_oneof_message::idscpReRat(data) => SecureChannelEvent::ReRat(data),
+            IdscpMessage_oneof_message::idscpReRa(data) => SecureChannelEvent::ReRa(data),
 
             IdscpMessage_oneof_message::idscpData(data) => SecureChannelEvent::Data(data),
 
@@ -2126,27 +2126,27 @@ mod tests {
     }
 
     fn p_msg() -> FsmEvent {
-        FromRatProver(RatMessage::RawData(vec![]))
+        FromRaProver(RaMessage::RawData(vec![]))
     }
 
     fn p_ok() -> FsmEvent {
-        FromRatProver(RatMessage::ControlMessage(RatIcm::OK))
+        FromRaProver(RaMessage::ControlMessage(RaIcm::OK))
     }
 
     fn p_failed() -> FsmEvent {
-        FromRatProver(RatMessage::ControlMessage(RatIcm::Failed))
+        FromRaProver(RaMessage::ControlMessage(RaIcm::Failed))
     }
 
     fn v_msg() -> FsmEvent {
-        FromRatVerifier(RatMessage::RawData(vec![]))
+        FromRaVerifier(RaMessage::RawData(vec![]))
     }
 
     fn v_ok() -> FsmEvent {
-        FromRatVerifier(RatMessage::ControlMessage(RatIcm::OK))
+        FromRaVerifier(RaMessage::ControlMessage(RaIcm::OK))
     }
 
     fn v_failed() -> FsmEvent {
-        FromRatVerifier(RatMessage::ControlMessage(RatIcm::Failed))
+        FromRaVerifier(RaMessage::ControlMessage(RaIcm::Failed))
     }
 
     fn sc_err() -> FsmEvent {
@@ -2161,8 +2161,8 @@ mod tests {
         FromUpper(UserEvent::Stop)
     }
 
-    fn u_re_rat() -> FsmEvent {
-        FromUpper(UserEvent::RepeatRat)
+    fn u_re_ra() -> FsmEvent {
+        FromUpper(UserEvent::RepeatRa)
     }
 
     fn u_data() -> FsmEvent {
@@ -2181,7 +2181,7 @@ mod tests {
         assert!(check_transition(locked(), locked(), u_data(), Inactive));
         assert!(check_transition(locked(), locked(), u_start(), Inactive));
         assert!(check_transition(locked(), locked(), u_stop(), Inactive));
-        assert!(check_transition(locked(), locked(), u_re_rat(), Inactive));
+        assert!(check_transition(locked(), locked(), u_re_ra(), Inactive));
         assert!(check_transition(locked(), locked(), sc_err(), Inactive));
         assert!(check_transition(
             locked(),
@@ -2190,15 +2190,15 @@ mod tests {
             Inactive
         ));
         assert!(check_transition(locked(), locked(), DatTimeout, Inactive));
-        assert!(check_transition(locked(), locked(), RatTimeout, Inactive));
+        assert!(check_transition(locked(), locked(), RaTimeout, Inactive));
         //check all secure channel messages
         assert!(check_transition(
             locked(),
             locked(),
             get_sc_event(create_idscp_hello(
                 Vec::from("valid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
@@ -2207,8 +2207,8 @@ mod tests {
             locked(),
             get_sc_event(create_idscp_hello(
                 Vec::from("invalid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
@@ -2245,19 +2245,19 @@ mod tests {
         assert!(check_transition(
             locked(),
             locked(),
-            get_sc_event(create_idscp_rat_verifier(Vec::new())),
+            get_sc_event(create_idscp_ra_verifier(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
             locked(),
             locked(),
-            get_sc_event(create_idscp_rat_prover(Vec::new())),
+            get_sc_event(create_idscp_ra_prover(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
             locked(),
             locked(),
-            get_sc_event(create_idscp_re_rat("ReRat")),
+            get_sc_event(create_idscp_re_ra("ReRa")),
             Inactive
         ));
 
@@ -2289,7 +2289,7 @@ mod tests {
         assert!(check_transition(
             unlocked(),
             unlocked(),
-            u_re_rat(),
+            u_re_ra(),
             Inactive
         ));
         //toDo assert!(check_transition(unlocked(), unlocked(), sc_data.clone()));
@@ -2309,7 +2309,7 @@ mod tests {
         assert!(check_transition(
             unlocked(),
             unlocked(),
-            RatTimeout,
+            RaTimeout,
             Inactive
         ));
         //check all secure channel messages
@@ -2318,8 +2318,8 @@ mod tests {
             unlocked(),
             get_sc_event(create_idscp_hello(
                 Vec::from("valid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
@@ -2328,8 +2328,8 @@ mod tests {
             unlocked(),
             get_sc_event(create_idscp_hello(
                 Vec::from("invalid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
@@ -2366,19 +2366,19 @@ mod tests {
         assert!(check_transition(
             unlocked(),
             unlocked(),
-            get_sc_event(create_idscp_rat_verifier(Vec::new())),
+            get_sc_event(create_idscp_ra_verifier(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
             unlocked(),
             unlocked(),
-            get_sc_event(create_idscp_rat_prover(Vec::new())),
+            get_sc_event(create_idscp_ra_prover(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
             unlocked(),
             unlocked(),
-            get_sc_event(create_idscp_re_rat("ReRat")),
+            get_sc_event(create_idscp_re_ra("ReRa")),
             Inactive
         ));
     }
@@ -2437,7 +2437,7 @@ mod tests {
         assert!(check_transition(
             WaitForHello,
             WaitForHello,
-            u_re_rat(),
+            u_re_ra(),
             Inactive
         ));
         assert!(check_transition(WaitForHello, locked(), sc_err(), Inactive));
@@ -2456,18 +2456,18 @@ mod tests {
         assert!(check_transition(
             WaitForHello,
             WaitForHello,
-            RatTimeout,
+            RaTimeout,
             Inactive
         ));
         //check all secure channel messages
-        //toDo add transitions for hello rat mechanism failed
+        //toDo add transitions for hello ra mechanism failed
         assert!(check_transition(
             WaitForHello,
-            WaitForRat,
+            WaitForRa,
             get_sc_event(create_idscp_hello(
                 Vec::from("valid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
@@ -2476,8 +2476,8 @@ mod tests {
             locked(),
             get_sc_event(create_idscp_hello(
                 Vec::from("invalid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
@@ -2514,765 +2514,753 @@ mod tests {
         assert!(check_transition(
             WaitForHello,
             WaitForHello,
-            get_sc_event(create_idscp_rat_verifier(Vec::new())),
+            get_sc_event(create_idscp_ra_verifier(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
             WaitForHello,
             WaitForHello,
-            get_sc_event(create_idscp_rat_prover(Vec::new())),
+            get_sc_event(create_idscp_ra_prover(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
             WaitForHello,
             WaitForHello,
-            get_sc_event(create_idscp_re_rat("ReRat")),
+            get_sc_event(create_idscp_re_ra("ReRa")),
             Inactive
         ));
     }
 
     #[test]
-    fn fsm_transition_wait_for_rat() {
-        assert!(check_transition(WaitForRat, WaitForRat, p_msg(), Inactive));
-        assert!(check_transition(WaitForRat, locked(), p_failed(), Inactive));
+    fn fsm_transition_wait_for_ra() {
+        assert!(check_transition(WaitForRa, WaitForRa, p_msg(), Inactive));
+        assert!(check_transition(WaitForRa, locked(), p_failed(), Inactive));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRatVerifier,
+            WaitForRa,
+            WaitForRaVerifier,
             p_ok(),
             Inactive
         ));
-        assert!(check_transition(WaitForRat, WaitForRat, v_msg(), Inactive));
-        assert!(check_transition(WaitForRat, locked(), v_failed(), Inactive));
+        assert!(check_transition(WaitForRa, WaitForRa, v_msg(), Inactive));
+        assert!(check_transition(WaitForRa, locked(), v_failed(), Inactive));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRatProver,
+            WaitForRa,
+            WaitForRaProver,
             v_ok(),
             Inactive
         ));
+        assert!(check_transition(WaitForRa, WaitForRa, u_start(), Inactive));
+        assert!(check_transition(WaitForRa, locked(), u_stop(), Inactive));
+        assert!(check_transition(WaitForRa, WaitForRa, u_re_ra(), Inactive));
+        assert!(check_transition(WaitForRa, locked(), sc_err(), Inactive));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
-            u_start(),
-            Inactive
-        ));
-        assert!(check_transition(WaitForRat, locked(), u_stop(), Inactive));
-        assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
-            u_re_rat(),
-            Inactive
-        ));
-        assert!(check_transition(WaitForRat, locked(), sc_err(), Inactive));
-        assert!(check_transition(
-            WaitForRat,
+            WaitForRa,
             locked(),
             HandshakeTimeout,
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
-            WaitForDatAndRat,
+            WaitForRa,
+            WaitForDatAndRa,
             DatTimeout,
             Inactive
         ));
-        assert!(check_transition(
-            WaitForRat, WaitForRat, RatTimeout, Inactive
-        ));
+        assert!(check_transition(WaitForRa, WaitForRa, RaTimeout, Inactive));
         //check all secure channel messages
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
+            WaitForRa,
+            WaitForRa,
             get_sc_event(create_idscp_hello(
                 Vec::from("valid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
+            WaitForRa,
+            WaitForRa,
             get_sc_event(create_idscp_hello(
                 Vec::from("invalid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
+            WaitForRa,
             locked(),
             get_sc_event(create_idscp_close(IdscpClose_CloseCause::ERROR, "")),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
+            WaitForRa,
+            WaitForRa,
             get_sc_event(create_idscp_dat(Vec::from("valid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
+            WaitForRa,
+            WaitForRa,
             get_sc_event(create_idscp_dat(Vec::from("invalid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
+            WaitForRa,
+            WaitForRa,
             get_sc_event(create_idscp_dat_exp()),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
+            WaitForRa,
+            WaitForRa,
             get_sc_event(create_idscp_data(Vec::from("DATA"), &AlternatingBit::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
-            get_sc_event(create_idscp_rat_verifier(Vec::new())),
+            WaitForRa,
+            WaitForRa,
+            get_sc_event(create_idscp_ra_verifier(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
-            get_sc_event(create_idscp_rat_prover(Vec::new())),
+            WaitForRa,
+            WaitForRa,
+            get_sc_event(create_idscp_ra_prover(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRat,
-            WaitForRat,
-            get_sc_event(create_idscp_re_rat("ReRat")),
+            WaitForRa,
+            WaitForRa,
+            get_sc_event(create_idscp_re_ra("ReRa")),
             Inactive
         ));
     }
 
     #[test]
-    fn fsm_transition_wait_for_rat_p() {
+    fn fsm_transition_wait_for_ra_p() {
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             p_msg(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
+            WaitForRaProver,
             locked(),
             p_failed(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
+            WaitForRaProver,
             Established,
             p_ok(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             v_msg(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             v_failed(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             v_ok(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             u_data(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             u_start(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
+            WaitForRaProver,
             locked(),
             u_stop(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRat,
-            u_re_rat(),
+            WaitForRaProver,
+            WaitForRa,
+            u_re_ra(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
+            WaitForRaProver,
             locked(),
             sc_err(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
+            WaitForRaProver,
             locked(),
             HandshakeTimeout,
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForDatAndRat,
+            WaitForRaProver,
+            WaitForDatAndRa,
             DatTimeout,
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRat,
-            RatTimeout,
+            WaitForRaProver,
+            WaitForRa,
+            RaTimeout,
             Inactive
         ));
         //check all secure channel messages
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             get_sc_event(create_idscp_hello(
                 Vec::from("valid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             get_sc_event(create_idscp_hello(
                 Vec::from("invalid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
+            WaitForRaProver,
             locked(),
             get_sc_event(create_idscp_close(IdscpClose_CloseCause::ERROR, "")),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             get_sc_event(create_idscp_dat(Vec::from("valid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             get_sc_event(create_idscp_dat(Vec::from("invalid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             get_sc_event(create_idscp_dat_exp()),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
+            WaitForRaProver,
+            WaitForRaProver,
             get_sc_event(create_idscp_data(Vec::from("DATA"), &AlternatingBit::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
-            get_sc_event(create_idscp_rat_verifier(Vec::new())),
+            WaitForRaProver,
+            WaitForRaProver,
+            get_sc_event(create_idscp_ra_verifier(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
-            get_sc_event(create_idscp_rat_prover(Vec::new())),
+            WaitForRaProver,
+            WaitForRaProver,
+            get_sc_event(create_idscp_ra_prover(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatProver,
-            WaitForRatProver,
-            get_sc_event(create_idscp_re_rat("ReRat")),
+            WaitForRaProver,
+            WaitForRaProver,
+            get_sc_event(create_idscp_re_ra("ReRa")),
             Inactive
         ));
     }
 
     #[test]
-    fn fsm_transition_wait_for_rat_v() {
+    fn fsm_transition_wait_for_ra_v() {
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             p_msg(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             p_failed(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             p_ok(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             v_msg(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
+            WaitForRaVerifier,
             locked(),
             v_failed(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
+            WaitForRaVerifier,
             Established,
             v_ok(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             u_data(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             u_start(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
+            WaitForRaVerifier,
             locked(),
             u_stop(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
-            u_re_rat(),
+            WaitForRaVerifier,
+            WaitForRaVerifier,
+            u_re_ra(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
+            WaitForRaVerifier,
             locked(),
             sc_err(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
+            WaitForRaVerifier,
             locked(),
             HandshakeTimeout,
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForRaVerifier,
+            WaitForDatAndRaVerifier,
             DatTimeout,
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
-            RatTimeout,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
+            RaTimeout,
             Inactive
         ));
         //check all secure channel messages
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             get_sc_event(create_idscp_hello(
                 Vec::from("valid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             get_sc_event(create_idscp_hello(
                 Vec::from("invalid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
+            WaitForRaVerifier,
             locked(),
             get_sc_event(create_idscp_close(IdscpClose_CloseCause::ERROR, "")),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             get_sc_event(create_idscp_dat(Vec::from("valid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             get_sc_event(create_idscp_dat(Vec::from("invalid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRat,
+            WaitForRaVerifier,
+            WaitForRa,
             get_sc_event(create_idscp_dat_exp()),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
+            WaitForRaVerifier,
+            WaitForRaVerifier,
             get_sc_event(create_idscp_data(Vec::from("DATA"), &AlternatingBit::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
-            get_sc_event(create_idscp_rat_verifier(Vec::new())),
+            WaitForRaVerifier,
+            WaitForRaVerifier,
+            get_sc_event(create_idscp_ra_verifier(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRatVerifier,
-            get_sc_event(create_idscp_rat_prover(Vec::new())),
+            WaitForRaVerifier,
+            WaitForRaVerifier,
+            get_sc_event(create_idscp_ra_prover(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForRatVerifier,
-            WaitForRat,
-            get_sc_event(create_idscp_re_rat("ReRat")),
+            WaitForRaVerifier,
+            WaitForRa,
+            get_sc_event(create_idscp_re_ra("ReRa")),
             Inactive
         ));
     }
 
     #[test]
-    fn fsm_transition_wait_for_dat_and_rat() {
+    fn fsm_transition_wait_for_dat_and_ra() {
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             p_msg(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
+            WaitForDatAndRa,
             locked(),
             p_failed(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRa,
+            WaitForDatAndRaVerifier,
             p_ok(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             v_msg(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             v_failed(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             v_ok(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             u_data(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             u_start(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
+            WaitForDatAndRa,
             locked(),
             u_stop(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
-            u_re_rat(),
+            WaitForDatAndRa,
+            WaitForDatAndRa,
+            u_re_ra(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
+            WaitForDatAndRa,
             locked(),
             sc_err(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
+            WaitForDatAndRa,
             locked(),
             HandshakeTimeout,
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             DatTimeout,
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
-            RatTimeout,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
+            RaTimeout,
             Inactive
         ));
         //check all secure channel messages
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             get_sc_event(create_idscp_hello(
                 Vec::from("valid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             get_sc_event(create_idscp_hello(
                 Vec::from("invalid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
+            WaitForDatAndRa,
             locked(),
             get_sc_event(create_idscp_close(IdscpClose_CloseCause::ERROR, "")),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForRat,
+            WaitForDatAndRa,
+            WaitForRa,
             get_sc_event(create_idscp_dat(Vec::from("valid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
+            WaitForDatAndRa,
             locked(),
             get_sc_event(create_idscp_dat(Vec::from("invalid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             get_sc_event(create_idscp_dat_exp()),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
+            WaitForDatAndRa,
+            WaitForDatAndRa,
             get_sc_event(create_idscp_data(Vec::from("DATA"), &AlternatingBit::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
-            get_sc_event(create_idscp_rat_verifier(Vec::new())),
+            WaitForDatAndRa,
+            WaitForDatAndRa,
+            get_sc_event(create_idscp_ra_verifier(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
-            get_sc_event(create_idscp_rat_prover(Vec::new())),
+            WaitForDatAndRa,
+            WaitForDatAndRa,
+            get_sc_event(create_idscp_ra_prover(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRat,
-            WaitForDatAndRat,
-            get_sc_event(create_idscp_re_rat("ReRat")),
+            WaitForDatAndRa,
+            WaitForDatAndRa,
+            get_sc_event(create_idscp_re_ra("ReRa")),
             Inactive
         ));
     }
 
     #[test]
-    fn fsm_transition_wait_for_dat_and_rat_v() {
+    fn fsm_transition_wait_for_dat_and_ra_v() {
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             p_msg(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             p_failed(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             p_ok(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             v_msg(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             v_failed(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             v_ok(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             u_data(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             u_start(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
             locked(),
             u_stop(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
-            u_re_rat(),
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
+            u_re_ra(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
             locked(),
             sc_err(),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
             locked(),
             HandshakeTimeout,
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             DatTimeout,
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
-            RatTimeout,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
+            RaTimeout,
             Inactive
         ));
         //check all secure channel messages
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             get_sc_event(create_idscp_hello(
                 Vec::from("valid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             get_sc_event(create_idscp_hello(
                 Vec::from("invalid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
             locked(),
             get_sc_event(create_idscp_close(IdscpClose_CloseCause::ERROR, "")),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForRaVerifier,
             get_sc_event(create_idscp_dat(Vec::from("valid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
             locked(),
             get_sc_event(create_idscp_dat(Vec::from("invalid"))),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRat,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRa,
             get_sc_event(create_idscp_dat_exp()),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
             get_sc_event(create_idscp_data(Vec::from("DATA"), &AlternatingBit::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
-            get_sc_event(create_idscp_rat_verifier(Vec::new())),
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
+            get_sc_event(create_idscp_ra_verifier(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRatVerifier,
-            get_sc_event(create_idscp_rat_prover(Vec::new())),
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRaVerifier,
+            get_sc_event(create_idscp_ra_prover(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
-            WaitForDatAndRatVerifier,
-            WaitForDatAndRat,
-            get_sc_event(create_idscp_re_rat("ReRat")),
+            WaitForDatAndRaVerifier,
+            WaitForDatAndRa,
+            get_sc_event(create_idscp_re_ra("ReRa")),
             Inactive
         ));
     }
@@ -3320,8 +3308,8 @@ mod tests {
         assert!(check_transition(Established, locked(), u_stop(), Inactive));
         assert!(check_transition(
             Established,
-            WaitForRatVerifier,
-            u_re_rat(),
+            WaitForRaVerifier,
+            u_re_ra(),
             Inactive
         ));
         assert!(check_transition(Established, locked(), sc_err(), Inactive));
@@ -3333,14 +3321,14 @@ mod tests {
         ));
         assert!(check_transition(
             Established,
-            WaitForDatAndRatVerifier,
+            WaitForDatAndRaVerifier,
             DatTimeout,
             Inactive
         ));
         assert!(check_transition(
             Established,
-            WaitForRatVerifier,
-            RatTimeout,
+            WaitForRaVerifier,
+            RaTimeout,
             Inactive
         ));
         //check all secure channel messages
@@ -3349,8 +3337,8 @@ mod tests {
             Established,
             get_sc_event(create_idscp_hello(
                 Vec::from("valid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
@@ -3359,8 +3347,8 @@ mod tests {
             Established,
             get_sc_event(create_idscp_hello(
                 Vec::from("invalid"),
-                &vec!["NullRat".to_owned()],
-                &vec!["NullRat".to_owned()]
+                &vec!["NullRa".to_owned()],
+                &vec!["NullRa".to_owned()]
             )),
             Inactive
         ));
@@ -3384,7 +3372,7 @@ mod tests {
         ));
         assert!(check_transition(
             Established,
-            WaitForRatProver,
+            WaitForRaProver,
             get_sc_event(create_idscp_dat_exp()),
             Inactive
         ));
@@ -3397,19 +3385,19 @@ mod tests {
         assert!(check_transition(
             Established,
             Established,
-            get_sc_event(create_idscp_rat_verifier(Vec::new())),
+            get_sc_event(create_idscp_ra_verifier(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
             Established,
             Established,
-            get_sc_event(create_idscp_rat_prover(Vec::new())),
+            get_sc_event(create_idscp_ra_prover(Vec::new())),
             Inactive
         ));
         assert!(check_transition(
             Established,
-            WaitForRatProver,
-            get_sc_event(create_idscp_re_rat("ReRat")),
+            WaitForRaProver,
+            get_sc_event(create_idscp_re_ra("ReRa")),
             Inactive
         ));
     }
@@ -3418,11 +3406,11 @@ mod tests {
     fn test_all_transitions() {
         fsm_transition_closed();
         fsm_transition_wait_for_hello();
-        fsm_transition_wait_for_rat();
-        fsm_transition_wait_for_rat_p();
-        fsm_transition_wait_for_rat_v();
-        fsm_transition_wait_for_dat_and_rat();
-        fsm_transition_wait_for_dat_and_rat_v();
+        fsm_transition_wait_for_ra();
+        fsm_transition_wait_for_ra_p();
+        fsm_transition_wait_for_ra_v();
+        fsm_transition_wait_for_dat_and_ra();
+        fsm_transition_wait_for_dat_and_ra_v();
         fsm_transition_established();
     }
 
@@ -3541,34 +3529,34 @@ mod tests {
     }
 
     #[test]
-    fn test_rat_algorithm_calculation() {
-        let peer_rat_suites = ["C".to_string(), "B".to_string(), "A".to_string()];
-        let own_rat_suites = ["B".to_string(), "C".to_string(), "D".to_string()];
+    fn test_ra_algorithm_calculation() {
+        let peer_ra_suites = ["C".to_string(), "B".to_string(), "A".to_string()];
+        let own_ra_suites = ["B".to_string(), "C".to_string(), "D".to_string()];
 
-        let rat_id =
-            FiniteStateMachine::calculate_rat_prover_mechanism(&peer_rat_suites, &own_rat_suites)
+        let ra_id =
+            FiniteStateMachine::calculate_ra_prover_mechanism(&peer_ra_suites, &own_ra_suites)
                 .unwrap();
-        assert_eq!(rat_id, "C");
+        assert_eq!(ra_id, "C");
 
-        let rat_id =
-            FiniteStateMachine::calculate_rat_verifier_mechanism(&peer_rat_suites, &own_rat_suites)
+        let ra_id =
+            FiniteStateMachine::calculate_ra_verifier_mechanism(&peer_ra_suites, &own_ra_suites)
                 .unwrap();
-        assert_eq!(rat_id, "B");
+        assert_eq!(ra_id, "B");
     }
 
     #[test]
-    fn negative_test_rat_algorithm_calculation() {
-        let peer_rat_suites = ["A".to_string(), "B".to_string()];
-        let own_rat_suites = ["C".to_string(), "D".to_string()];
+    fn negative_test_ra_algorithm_calculation() {
+        let peer_ra_suites = ["A".to_string(), "B".to_string()];
+        let own_ra_suites = ["C".to_string(), "D".to_string()];
 
         assert_eq!(
-            FiniteStateMachine::calculate_rat_prover_mechanism(&peer_rat_suites, &own_rat_suites),
-            Err(RatNegotiationError::NoRatMechanismMatch)
+            FiniteStateMachine::calculate_ra_prover_mechanism(&peer_ra_suites, &own_ra_suites),
+            Err(RaNegotiationError::NoRaMechanismMatch)
         );
 
         assert_eq!(
-            FiniteStateMachine::calculate_rat_verifier_mechanism(&peer_rat_suites, &own_rat_suites),
-            Err(RatNegotiationError::NoRatMechanismMatch)
+            FiniteStateMachine::calculate_ra_verifier_mechanism(&peer_ra_suites, &own_ra_suites),
+            Err(RaNegotiationError::NoRaMechanismMatch)
         );
     }
 }
