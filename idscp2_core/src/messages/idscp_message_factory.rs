@@ -1,4 +1,6 @@
-use super::idscpv2_messages::{IdscpDat, IdscpData, IdscpHello, IdscpMessage};
+use super::idscpv2_messages::{
+    IdscpClose, IdscpClose_CloseCause, IdscpDat, IdscpData, IdscpHello, IdscpMessage,
+};
 use bytes::Bytes;
 use protobuf::SingularPtrField;
 
@@ -13,15 +15,14 @@ pub(crate) fn create_idscp_hello(
     let mut hello = IdscpHello::new();
     hello.version = 2;
     hello.dynamicAttributeToken = SingularPtrField::some(idscp_dat);
-    hello.expectedRatSuite = protobuf::RepeatedField::from_ref(expected_rat_suite);
-    hello.supportedRatSuite = protobuf::RepeatedField::from_ref(supported_rat_suite);
+    hello.expectedRaSuite = protobuf::RepeatedField::from_ref(expected_rat_suite);
+    hello.supportedRaSuite = protobuf::RepeatedField::from_ref(supported_rat_suite);
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpHello(hello);
     idscp
 }
 
-/* just commenting out because i dont need it right now
 pub(crate) fn create_idscp_close(code: IdscpClose_CloseCause, msg: &'static str) -> IdscpMessage {
     let mut close = IdscpClose::new();
     close.cause_code = code;
@@ -32,6 +33,7 @@ pub(crate) fn create_idscp_close(code: IdscpClose_CloseCause, msg: &'static str)
     idscp
 }
 
+/* just commenting out because i dont need it right now
 pub(crate) fn create_idscp_dat_exp() -> IdscpMessage {
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpDatExpired(IdscpDatExpired::new());
