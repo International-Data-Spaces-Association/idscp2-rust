@@ -3,8 +3,13 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
+use crate::api::idscp2_config::AttestationConfig;
 use crate::driver::daps_driver::DapsDriver;
 use crate::fsm::FsmError;
+use crate::messages::idscp_message_factory;
+use crate::messages::idscpv2_messages::{
+    IdscpClose_CloseCause, IdscpMessage, IdscpMessage_oneof_message,
+};
 
 enum ProtocolState {
     Closed,
@@ -14,7 +19,7 @@ enum ProtocolState {
 }
 
 pub(crate) enum FsmAction {
-    SecureChannelAction(SecureChannelEvent),
+    SecureChannelAction(SecureChannelAction),
     // NotifyUserData(Vec<u8>),
     SetDatTimeout(Duration),
 }
@@ -27,28 +32,26 @@ pub(crate) enum FsmEvent {
     FromSecureChannel(SecureChannelEvent),
 }
 
-#[derive(Debug)]
-// TODO implement with Protobuf
-pub(crate) struct IdscpMessage {
-    pub(super) msg_type: IdscpMessageType,
+/*pub(crate) enum FsmIdscpMessageType {
+    Hello,
+    Close,
+    Data
 }
 
-#[allow(clippy::enum_variant_names)]
-#[derive(Debug)]
-pub(crate) enum IdscpMessageType {
-    IdscpHello(String),
-    IdscpReAttest,
-    IdscpProverMsg,
-    IdscpDat,
-    IdscpAck,
-    IdscpVerifierMsg,
-    IdscpDatExpired,
-    IdscpData,
-    IdscpClose,
+impl Into<FsmIdscpMessageType> for &IdscpMessage {
+    fn into(self) -> FsmIdscpMessageType {
+        if match self.message
+    }
 }
+*/
 
 #[derive(Debug)]
 pub(crate) enum SecureChannelEvent {
+    Message(IdscpMessage_oneof_message),
+}
+
+#[derive(Debug)]
+pub(crate) enum SecureChannelAction {
     Message(IdscpMessage),
 }
 
@@ -79,7 +82,8 @@ enum TimeoutState<T> {
 
 type ResendTimeout = u64; //TODO!
 
-pub(crate) struct Fsm<'daps> {
+pub(crate) struct Fsm<'daps, 'config> {
+    /* all of the variables that make up the whole state space of the FSM */
     state: ProtocolState,
     prover: RaState<RaProverType>,
     verifier: RaState<RaVerifierType>,
@@ -87,10 +91,15 @@ pub(crate) struct Fsm<'daps> {
     dat_timeout: TimeoutState<()>,
     ra_timeout: TimeoutState<()>,
     resend_timeout: TimeoutState<ResendTimeout>,
+    /* configs */
+    ra_config: &'config AttestationConfig,
 }
 
-impl<'daps> Fsm<'daps> {
-    pub(crate) fn new(daps_driver: &'daps mut dyn DapsDriver) -> Fsm {
+impl<'daps, 'config> Fsm<'daps, 'config> {
+    pub(crate) fn new(
+        daps_driver: &'daps mut dyn DapsDriver,
+        ra_config: &'config AttestationConfig,
+    ) -> Fsm<'daps, 'config> {
         Fsm {
             state: ProtocolState::Closed,
             prover: RaState::Inactive(PhantomData {}),
@@ -99,6 +108,7 @@ impl<'daps> Fsm<'daps> {
             dat_timeout: TimeoutState::Inactive,
             ra_timeout: TimeoutState::Inactive,
             resend_timeout: TimeoutState::Inactive,
+            ra_config,
         }
     }
 
@@ -125,11 +135,15 @@ impl<'daps> Fsm<'daps> {
                 TimeoutState::Inactive, // Resend timeout
                 FsmEvent::FromUpper(UserEvent::StartHandshake),
             ) => {
+                let hello_msg = idscp_message_factory::create_idscp_hello(
+                    self.daps_driver.get_token().into_bytes(),
+                    &self.ra_config.expected_attestation_suite,
+                    &self.ra_config.supported_attestation_suite,
+                );
+
                 self.state = ProtocolState::WaitForHello;
                 Ok(vec![FsmAction::SecureChannelAction(
-                    SecureChannelEvent::Message(IdscpMessage {
-                        msg_type: IdscpMessageType::IdscpHello("hello".to_string()),
-                    }),
+                    SecureChannelAction::Message(hello_msg),
                 )])
             }
 
@@ -142,12 +156,13 @@ impl<'daps> Fsm<'daps> {
                 TimeoutState::Inactive, // Dat timeout
                 TimeoutState::Inactive, // Ra timeout
                 TimeoutState::Inactive, // Resend timeout
-                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(IdscpMessage {
-                    msg_type: IdscpMessageType::IdscpHello(dat),
-                })),
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+                    IdscpMessage_oneof_message::idscpHello(hello_msg),
+                )),
             ) => {
+                let dat = hello_msg.get_dynamicAttributeToken();
                 let mut actions = vec![];
-                match self.daps_driver.verify_token(dat) {
+                match self.daps_driver.verify_token(dat.get_token()) {
                     Some(dat_timeout) => {
                         self.state = ProtocolState::Running;
                         self.prover = RaState::Working; // TODO: do it with real driver
@@ -155,11 +170,14 @@ impl<'daps> Fsm<'daps> {
                         actions.push(FsmAction::SetDatTimeout(dat_timeout));
                     }
                     None => {
-                        actions.push(FsmAction::SecureChannelAction(SecureChannelEvent::Message(
-                            IdscpMessage {
-                                msg_type: IdscpMessageType::IdscpClose,
-                            },
-                        )));
+                        actions.push(FsmAction::SecureChannelAction(
+                            SecureChannelAction::Message(
+                                idscp_message_factory::create_idscp_close(
+                                    IdscpClose_CloseCause::NO_VALID_DAT,
+                                    "",
+                                ),
+                            ),
+                        ));
                         self.cleanup();
                     }
                 }

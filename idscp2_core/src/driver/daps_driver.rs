@@ -30,7 +30,7 @@ pub trait DapsDriver {
     //None if token is not valid
     fn verify_token(
         &self,
-        token: &str,
+        token: &[u8],
         //toDo security_requirements: Option<Self::SecurityReq>,
     ) -> Option<Duration>; //TODO return std::Duration
 }

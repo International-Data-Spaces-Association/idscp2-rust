@@ -1,3 +1,4 @@
+pub mod api;
 mod chunkvec;
 mod driver;
 mod fsm;
