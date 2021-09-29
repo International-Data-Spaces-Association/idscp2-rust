@@ -29,7 +29,7 @@ pub trait DapsDriver {
     //verify token and receive validity_period in seconds in an Option<u64>
     //None if token is not valid
     fn verify_token(
-        &self,
+        &mut self,
         token: &[u8],
         //toDo security_requirements: Option<Self::SecurityReq>,
     ) -> Option<Duration>; //TODO return std::Duration

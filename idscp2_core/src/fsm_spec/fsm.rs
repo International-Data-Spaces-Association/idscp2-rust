@@ -24,12 +24,23 @@ pub(crate) enum FsmAction {
     SetDatTimeout(Duration),
 }
 
+pub(crate) enum RaMessage<RaType> {
+    Ok,
+    Failed,
+    RawData(Vec<u8>, PhantomData<RaType>),
+}
+
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum FsmEvent {
     // USER EVENTS
     FromUpper(UserEvent),
 
     // SECURE CHANNEL EVENTS
     FromSecureChannel(SecureChannelEvent),
+
+    // RA DRIVER EVENTS
+    FromRaProver(RaMessage<RaProverType>),
+    FromRaVerifier(RaMessage<RaVerifierType>),
 }
 
 /*pub(crate) enum FsmIdscpMessageType {
@@ -63,9 +74,9 @@ pub(crate) enum UserEvent {
 }
 
 trait RaType {}
-struct RaProverType {}
+pub(crate) struct RaProverType {}
 impl RaType for RaProverType {}
-struct RaVerifierType {}
+pub(crate) struct RaVerifierType {}
 impl RaType for RaVerifierType {}
 
 enum RaState<RaType> {
@@ -75,8 +86,8 @@ enum RaState<RaType> {
     Terminated,
 }
 
-enum TimeoutState<T> {
-    Active(T),
+enum TimeoutState {
+    Active,
     Inactive,
 }
 
@@ -88,9 +99,9 @@ pub(crate) struct Fsm<'daps, 'config> {
     prover: RaState<RaProverType>,
     verifier: RaState<RaVerifierType>,
     daps_driver: &'daps mut dyn DapsDriver,
-    dat_timeout: TimeoutState<()>,
-    ra_timeout: TimeoutState<()>,
-    resend_timeout: TimeoutState<ResendTimeout>,
+    dat_timeout: TimeoutState,
+    ra_timeout: TimeoutState,
+    resend_timeout: TimeoutState,
     /* configs */
     ra_config: &'config AttestationConfig,
 }
@@ -122,7 +133,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             &self.dat_timeout,
             &self.ra_timeout,
             &self.resend_timeout,
-            &event,
+            event,
         ) {
             // TLA Action "Start"
             (
@@ -147,7 +158,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 )])
             }
 
-            // TLA Action "Receive Hallo"
+            // TLA Action "ReceiveHallo"
             (
                 ProtocolState::WaitForHello,
                 RaState::Inactive(_),   // Prover state
@@ -168,6 +179,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                         self.prover = RaState::Working; // TODO: do it with real driver
                         self.verifier = RaState::Working;
                         actions.push(FsmAction::SetDatTimeout(dat_timeout));
+                        self.dat_timeout = TimeoutState::Active // TODO: make it one operation with SetDatTimeout
                     }
                     None => {
                         actions.push(FsmAction::SecureChannelAction(
@@ -182,6 +194,38 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     }
                 }
                 Ok(actions)
+            }
+
+            // TLA Action "SendProverMsg"
+            (
+                ProtocolState::Running,
+                RaState::Working, // Prover state
+                _,                // Verifier state
+                _,                // DAT is valid?
+                _,                // Dat timeout
+                _,                // Ra timeout
+                _,                // Resend timeout
+                FsmEvent::FromRaProver(RaMessage::RawData(bytes, _)),
+            ) => {
+                let msg = idscp_message_factory::create_idscp_ra_prover(bytes);
+                let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
+                Ok(vec![action])
+            }
+
+            // TLA Action "SendVerifierMsg"
+            (
+                ProtocolState::Running,
+                _,                      // Prover state
+                RaState::Working,       // Verifier state
+                true,                   // DAT is valid?
+                TimeoutState::Active,   // Dat timeout
+                TimeoutState::Inactive, // Ra timeout
+                _,                      // Resend timeout
+                FsmEvent::FromRaVerifier(RaMessage::RawData(bytes, _)),
+            ) => {
+                let msg = idscp_message_factory::create_idscp_ra_verifier(bytes);
+                let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
+                Ok(vec![action])
             }
 
             _ => unimplemented!(),

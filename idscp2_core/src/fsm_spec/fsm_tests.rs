@@ -1,11 +1,8 @@
 use crate::{
-    api::idscp2_config::AttestationConfig,
-    driver::daps_driver::DapsDriver,
-    messages::{
-        idscp_message_factory,
-    },
+    api::idscp2_config::AttestationConfig, driver::daps_driver::DapsDriver,
+    messages::idscp_message_factory,
 };
-use std::{time::Duration, vec};
+use std::{marker::PhantomData, time::Duration, vec};
 
 use super::fsm::*;
 
@@ -22,9 +19,10 @@ impl DapsDriver for TestDaps {
         "valid".to_string()
     }
 
-    fn verify_token(&self, token_bytes: &[u8]) -> Option<Duration> {
+    fn verify_token(&mut self, token_bytes: &[u8]) -> Option<Duration> {
         let token = String::from_utf8_lossy(token_bytes);
         if token.eq("valid") {
+            self.is_valid = true;
             Some(Duration::from_secs(1))
         } else {
             None
@@ -63,5 +61,17 @@ fn normal_sequence() {
         )))
         .unwrap();
     assert!(actions.len() == 1);
-    assert!(matches!(&actions[0], FsmAction::SetDatTimeout(_)))
+    assert!(matches!(&actions[0], FsmAction::SetDatTimeout(_)));
+
+    let actions = fsm
+        .process_event(FsmEvent::FromRaVerifier(RaMessage::RawData(
+            "nonce".as_bytes().to_owned(),
+            PhantomData,
+        )))
+        .unwrap();
+    assert!(actions.len() == 1);
+    assert!(matches!(
+        &actions[0],
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(_))
+    ));
 }
