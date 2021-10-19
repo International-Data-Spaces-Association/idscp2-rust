@@ -1,4 +1,7 @@
-use crate::{api::idscp2_config::AttestationConfig, driver::daps_driver::DapsDriver};
+use crate::{
+    api::idscp2_config::AttestationConfig, driver::daps_driver::DapsDriver,
+    messages::idscpv2_messages::IdscpMessage_oneof_message,
+};
 use std::{marker::PhantomData, time::Duration, vec};
 
 use super::fsm::*;
@@ -44,7 +47,7 @@ fn normal_sequence() {
     assert!(actions.len() == 1);
     let hello_msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
-        _ => panic!("expected hello message"),
+        _ => panic!("expected Secure Channel message"),
     };
 
     // TLA Action ReceiveHello
@@ -67,7 +70,7 @@ fn normal_sequence() {
     assert!(actions.len() == 1);
     let verif_msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(verif_msg)) => verif_msg,
-        _ => panic!("expected verifier message"),
+        _ => panic!("expected Secure Channel message"),
     };
     assert!(verif_msg.has_idscpRaVerifier());
 
@@ -78,6 +81,7 @@ fn normal_sequence() {
             verif_msg,
         )))
         .unwrap();
+    assert!(actions.len() == 1);
     assert!(matches!(&actions[0], FsmAction::ToProver(_)));
 
     // TLA Action SendProverMsg
@@ -90,7 +94,7 @@ fn normal_sequence() {
     assert!(actions.len() == 1);
     let prover_msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(prover_msg)) => prover_msg,
-        _ => panic!("expected prover message"),
+        _ => panic!("expected Secure Channel message"),
     };
     assert!(prover_msg.has_idscpRaProver());
 
@@ -101,5 +105,23 @@ fn normal_sequence() {
             prover_msg,
         )))
         .unwrap();
+    assert!(actions.len() == 1);
     assert!(matches!(&actions[0], FsmAction::ToVerifier(_)));
+
+    // TLA Action Verifier Success
+    let actions = fsm
+        .process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(
+            "attestation successful".as_bytes().to_owned(),
+        )))
+        .unwrap();
+    assert!(actions.len() == 2);
+    let msg = match &actions[0] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+    assert!(matches!(
+        msg.clone().message.unwrap(),
+        IdscpMessage_oneof_message::idscpRaVerifier(_)
+    ));
+    assert!(matches!(&actions[1], FsmAction::SetRaTimeout(_)));
 }

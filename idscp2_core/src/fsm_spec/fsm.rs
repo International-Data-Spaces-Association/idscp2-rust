@@ -22,12 +22,13 @@ pub(crate) enum FsmAction {
     SecureChannelAction(SecureChannelAction),
     // NotifyUserData(Vec<u8>),
     SetDatTimeout(Duration),
+    SetRaTimeout(Duration),
     ToProver(Vec<u8>),
     ToVerifier(Vec<u8>),
 }
 
 pub(crate) enum RaMessage<RaType> {
-    Ok,
+    Ok(Vec<u8>),
     Failed,
     RawData(Vec<u8>, PhantomData<RaType>),
 }
@@ -265,6 +266,25 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 Ok(vec![action])
             }
 
+            // TLA Action "VerifierSuccess"
+            (
+                ProtocolState::Running,
+                _,                                            // Prover state
+                RaState::Working,                             // Verifier state
+                true,                                         // DAT is valid?
+                TimeoutState::Active,                         // Dat timeout
+                TimeoutState::Inactive,                       // Ra timeout
+                _,                                            // Resend timeout
+                FsmEvent::FromRaVerifier(RaMessage::Ok(msg)), // TODO: adapt specification to make clear that Verifier signals success?
+            ) => {
+                let msg = idscp_message_factory::create_idscp_ra_verifier(msg);
+                let send_action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
+                let ra_timeout_action = FsmAction::SetRaTimeout(self.ra_config.ra_timeout);
+                self.ra_timeout = TimeoutState::Active; // TODO: make it one operation with SetDatTimeout
+                Ok(vec![send_action, ra_timeout_action])
+            }
+
+            // TODO TLA Action VerifierError
             _ => unimplemented!(),
         }
     }
