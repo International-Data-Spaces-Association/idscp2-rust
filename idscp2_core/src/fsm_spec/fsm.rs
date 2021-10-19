@@ -22,6 +22,8 @@ pub(crate) enum FsmAction {
     SecureChannelAction(SecureChannelAction),
     // NotifyUserData(Vec<u8>),
     SetDatTimeout(Duration),
+    ToProver(Vec<u8>),
+    ToVerifier(Vec<u8>),
 }
 
 pub(crate) enum RaMessage<RaType> {
@@ -123,6 +125,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
         }
     }
 
+    //TODO: make returned Result a stack-allocated vector of FsmAction because we expect this Vector to be small (one or two elements)
     pub(crate) fn process_event(&mut self, event: FsmEvent) -> Result<Vec<FsmAction>, FsmError> {
         let dat = self.daps_driver.is_valid();
         match (
@@ -225,6 +228,40 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 let msg = idscp_message_factory::create_idscp_ra_verifier(bytes);
                 let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
+                Ok(vec![action])
+            }
+
+            // TLA Action "ReceiveVerifierMsg"
+            (
+                ProtocolState::Running,
+                RaState::Working, // Prover state
+                _,                // Verifier state
+                _,                // DAT is valid?
+                _,                // Dat timeout
+                _,                // Ra timeout
+                _,                // Resend timeout
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+                    IdscpMessage_oneof_message::idscpRaVerifier(msg),
+                )),
+            ) => {
+                let action = FsmAction::ToProver(msg.data.to_vec());
+                Ok(vec![action])
+            }
+
+            // TLA Action "ReceiveProverMsg"
+            (
+                ProtocolState::Running,
+                _,                      // Prover state
+                RaState::Working,       // Verifier state
+                true,                   // DAT is valid?
+                TimeoutState::Active,   // Dat timeout
+                TimeoutState::Inactive, // Ra timeout
+                _,                      // Resend timeout
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+                    IdscpMessage_oneof_message::idscpRaProver(msg),
+                )),
+            ) => {
+                let action = FsmAction::ToVerifier(msg.data.to_vec());
                 Ok(vec![action])
             }
 
