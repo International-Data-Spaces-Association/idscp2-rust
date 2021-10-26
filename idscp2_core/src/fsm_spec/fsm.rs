@@ -3,12 +3,12 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use crate::api::idscp2_config::AttestationConfig;
+use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
 use crate::fsm::FsmError;
 use crate::messages::idscp_message_factory;
 use crate::messages::idscpv2_messages::{
-    IdscpClose_CloseCause, IdscpMessage, IdscpMessage_oneof_message,
+    IdscpClose_CloseCause, IdscpData, IdscpMessage, IdscpMessage_oneof_message,
 };
 
 enum ProtocolState {
@@ -23,13 +23,14 @@ pub(crate) enum FsmAction {
     // NotifyUserData(Vec<u8>),
     SetDatTimeout(Duration),
     SetRaTimeout(Duration),
+    SetResendDataTimeout(Duration),
     ToProver(Vec<u8>),
     ToVerifier(Vec<u8>),
 }
 
 pub(crate) enum RaMessage<RaType> {
-    Ok(Vec<u8>),
-    Failed,
+    Ok(Vec<u8>), // TODO: maybe make the inner type an Option<Vec<u8>> to not send packet with empty data
+    Failed(),
     RawData(Vec<u8>, PhantomData<RaType>),
 }
 
@@ -94,6 +95,63 @@ enum TimeoutState {
     Inactive,
 }
 
+#[derive(PartialEq)]
+enum AckBit {
+    Unset,
+    Set,
+}
+
+impl AckBit {
+    /// this resembles the operiation : 1 - other
+    fn from_other_flipped(other: &AckBit) -> AckBit {
+        match other {
+            AckBit::Set => AckBit::Unset,
+            AckBit::Unset => AckBit::Set,
+        }
+    }
+}
+
+impl From<AckBit> for bool {
+    fn from(x: AckBit) -> bool {
+        match x {
+            AckBit::Unset => false,
+            AckBit::Set => true,
+        }
+    }
+}
+
+impl From<bool> for AckBit {
+    fn from(x: bool) -> AckBit {
+        match x {
+            false => AckBit::Unset,
+            true => AckBit::Set,
+        }
+    }
+}
+
+struct ResendMetadata {
+    msg: Option<IdscpData>,
+}
+impl ResendMetadata {
+    fn new() -> ResendMetadata {
+        ResendMetadata { msg: None }
+    }
+
+    fn set(&mut self, msg: IdscpData) {
+        self.msg = Some(msg)
+    }
+
+    fn get_ack_bit(&self) -> AckBit {
+        match &self.msg {
+            Some(msg) => msg.alternating_bit.into(),
+            None => AckBit::Unset, // In the Specification, ack bit is initialized to 0/false
+        }
+    }
+}
+
+struct LastDataSent(ResendMetadata);
+struct LastDataReceived(ResendMetadata);
+
 type ResendTimeout = u64; //TODO!
 
 pub(crate) struct Fsm<'daps, 'config> {
@@ -105,14 +163,17 @@ pub(crate) struct Fsm<'daps, 'config> {
     dat_timeout: TimeoutState,
     ra_timeout: TimeoutState,
     resend_timeout: TimeoutState,
+    last_ack_received: AckBit,
+    last_data_sent: LastDataSent,
+    last_data_received: LastDataReceived,
     /* configs */
-    ra_config: &'config AttestationConfig,
+    config: &'config IdscpConfig<'config>,
 }
 
 impl<'daps, 'config> Fsm<'daps, 'config> {
     pub(crate) fn new(
         daps_driver: &'daps mut dyn DapsDriver,
-        ra_config: &'config AttestationConfig,
+        config: &'config IdscpConfig<'config>,
     ) -> Fsm<'daps, 'config> {
         Fsm {
             state: ProtocolState::Closed,
@@ -122,7 +183,10 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             dat_timeout: TimeoutState::Inactive,
             ra_timeout: TimeoutState::Inactive,
             resend_timeout: TimeoutState::Inactive,
-            ra_config,
+            last_ack_received: AckBit::Unset,
+            last_data_sent: LastDataSent(ResendMetadata::new()),
+            last_data_received: LastDataReceived(ResendMetadata::new()),
+            config,
         }
     }
 
@@ -152,8 +216,8 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 let hello_msg = idscp_message_factory::create_idscp_hello(
                     self.daps_driver.get_token().into_bytes(),
-                    &self.ra_config.expected_attestation_suite,
-                    &self.ra_config.supported_attestation_suite,
+                    &self.config.ra_config.expected_attestation_suite,
+                    &self.config.ra_config.supported_attestation_suite,
                 );
 
                 self.state = ProtocolState::WaitForHello;
@@ -277,16 +341,78 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 _,                                            // Resend timeout
                 FsmEvent::FromRaVerifier(RaMessage::Ok(msg)), // TODO: adapt specification to make clear that Verifier signals success?
             ) => {
+                self.verifier = RaState::Done;
                 let msg = idscp_message_factory::create_idscp_ra_verifier(msg);
                 let send_action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
-                let ra_timeout_action = FsmAction::SetRaTimeout(self.ra_config.ra_timeout);
-                self.ra_timeout = TimeoutState::Active; // TODO: make it one operation with SetDatTimeout
+                let ra_timeout_action = FsmAction::SetRaTimeout(self.config.ra_config.ra_timeout);
+                self.ra_timeout = TimeoutState::Active; // TODO: make it one operation with SetRaTimeout
                 Ok(vec![send_action, ra_timeout_action])
             }
 
-            // TODO TLA Action VerifierError
+            // TODO: TLA Action VerifierError
+
+            // TLA Action "ProverSuccess"
+            // We need an action "ProverSuccess" which is not obviously represented in the specification!
+            // Otherwhise prover_state is never set to "done"
+            (
+                ProtocolState::Running,
+                RaState::Working,                           // Prover state
+                _,                                          // Verifier state
+                _,                                          // DAT is valid?
+                _,                                          // Dat timeout
+                _,                                          // Ra timeout
+                _,                                          // Resend timeout
+                FsmEvent::FromRaProver(RaMessage::Ok(msg)), // TODO: adapt specification to make clear that Verifier signals success?
+            ) => {
+                self.prover = RaState::Done;
+                let msg = idscp_message_factory::create_idscp_ra_prover(msg);
+                Ok(vec![FsmAction::SecureChannelAction(
+                    SecureChannelAction::Message(msg),
+                )])
+            }
+
+            // TODO: TLA Action DatExpired
+            // TODO: TLA Action ReceiveDatExpired
+            // TODO: TLA Action ReceiveDat
+
+            // TLA Action SendData
+            (
+                ProtocolState::Running,
+                RaState::Done,                              // Prover state
+                RaState::Done,                              // Verifier state
+                true,                                       // DAT is valid?
+                TimeoutState::Active,                       // Dat timeout
+                TimeoutState::Active,                       // Ra timeout
+                TimeoutState::Inactive,                     // Resend timeout
+                FsmEvent::FromUpper(UserEvent::Data(data)), // TODO: adapt specification to make clear that Verifier signals success?
+            ) => {
+                if self.last_ack_received == self.last_data_sent.0.get_ack_bit() {
+                    let msg = idscp_message_factory::create_idscp_data(
+                        data,
+                        AckBit::from_other_flipped(&self.last_ack_received).into(),
+                    );
+                    self.last_data_sent.0.set(msg.get_idscpData().clone());
+                    Ok(vec![
+                        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)),
+                        FsmAction::SetResendDataTimeout(self.config.resend_timeout),
+                    ])
+                } else {
+                    self.no_matching_event()
+                }
+            }
+
             _ => unimplemented!(),
         }
+    }
+
+    /// This function is needed because Rust's match statement cannot express all Condtions encoded in the IDSCP2 Specification.
+    /// Rust's match statement can only compare a variable to static value of the same type, e.g. protocol_state == ProtocolState::Running.
+    /// It CANNOT compare two variables (e.g. lastAckReceived == lastDataSent.ack).
+    /// Therefore we need to make this check within the body of the match arm.
+    /// If this check does not succeed, we call this method to have a common place to ignore events that do not trigger
+    /// an action in the current FSM state.
+    fn no_matching_event(&self) -> Result<Vec<FsmAction>, FsmError> {
+        unimplemented!()
     }
 
     // Implements the TLA spec's action "Close"

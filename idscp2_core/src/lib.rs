@@ -10,8 +10,7 @@ use byteorder::ByteOrder;
 use chunkvec::ChunkVecBuffer;
 use fsm::*;
 use messages::{
-    idscp_message_factory::{self as msg_factory, create_idscp_data},
-    idscpv2_messages::IdscpMessage,
+    idscp_message_factory as msg_factory, idscpv2_messages::IdscpMessage,
     idscpv2_messages::IdscpMessage_oneof_message,
 };
 use protobuf::Message;
@@ -52,7 +51,7 @@ impl IdscpConnection {
             }
 
             FsmAction::SecureChannelAction(SecureChannelEvent::Data(data)) => {
-                let msg = msg_factory::create_idscp_data(data);
+                let msg = msg_factory::old_create_idscp_data(data);
                 self.push_to_send_buffer(msg)
             }
         }
@@ -142,7 +141,7 @@ impl IdscpConnection {
     }
 
     pub fn send(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        let msg: IdscpMessage = create_idscp_data(vec![]); // create empty package to determine size overhead of protobuf encapsulation
+        let msg: IdscpMessage = msg_factory::old_create_idscp_data(vec![]); // create empty package to determine size overhead of protobuf encapsulation
         let header_size = msg.compute_size();
         let buffer_space: usize = 42; // this is a fictive number, because we currently have an unbounded buffer that has no limits
         let payload_space = buffer_space.saturating_sub(usize::try_from(header_size).unwrap());

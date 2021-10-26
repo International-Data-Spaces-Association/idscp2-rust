@@ -1,5 +1,6 @@
 use crate::{
-    api::idscp2_config::AttestationConfig, driver::daps_driver::DapsDriver,
+    api::idscp2_config::{AttestationConfig, IdscpConfig},
+    driver::daps_driver::DapsDriver,
     messages::idscpv2_messages::IdscpMessage_oneof_message,
 };
 use std::{marker::PhantomData, time::Duration, vec};
@@ -38,7 +39,11 @@ fn normal_sequence() {
         expected_attestation_suite: vec!["TestRatProver".to_string()],
         ra_timeout: Duration::from_secs(30),
     };
-    let mut fsm = Fsm::new(&mut daps_driver, &ra_config);
+    let config = IdscpConfig {
+        ra_config: &ra_config,
+        resend_timeout: Duration::from_secs(5),
+    };
+    let mut fsm = Fsm::new(&mut daps_driver, &config);
 
     // TLA Action Start
     let actions = fsm
@@ -124,4 +129,42 @@ fn normal_sequence() {
         IdscpMessage_oneof_message::idscpRaVerifier(_)
     ));
     assert!(matches!(&actions[1], FsmAction::SetRaTimeout(_)));
+
+    // Action ProverSuccess (which is only implicitly defined in TLA Spec)
+    let actions = fsm
+        .process_event(FsmEvent::FromRaProver(RaMessage::Ok(
+            "attestation successful".as_bytes().to_owned(),
+        )))
+        .unwrap();
+    let msg = match &actions[0] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+    assert!(matches!(
+        msg.clone().message.unwrap(),
+        IdscpMessage_oneof_message::idscpRaProver(_)
+    ));
+
+    // TLA Action SendData
+    let actions = fsm
+        .process_event(FsmEvent::FromUpper(UserEvent::Data(
+            "hello world!".as_bytes().to_owned(),
+        )))
+        .unwrap();
+    assert!(actions.len() == 2);
+    let msg = match &actions[0] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+    match msg.message.as_ref().unwrap() {
+        IdscpMessage_oneof_message::idscpData(data) => {
+            assert_eq!(data.alternating_bit, true)
+        }
+        _ => panic!("expected IdscpData"),
+    }
+    assert!(matches!(
+        msg.message.as_ref().unwrap(),
+        IdscpMessage_oneof_message::idscpData(_)
+    ));
+    assert!(matches!(&actions[1], FsmAction::SetResendDataTimeout(_)));
 }

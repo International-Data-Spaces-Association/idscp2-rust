@@ -96,11 +96,22 @@ pub(crate) fn create_idscp_rat_verifier(data: Vec<u8>) -> IdscpMessage {
 }
  */
 
-pub(crate) fn create_idscp_data(data: Vec<u8>) -> IdscpMessage {
+pub(crate) fn old_create_idscp_data(data: Vec<u8>) -> IdscpMessage {
     let mut idscp_data = IdscpData::new();
     idscp_data.data = Bytes::from(data);
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpData(idscp_data);
+    idscp
+}
+
+pub(crate) fn create_idscp_data(data: Vec<u8>, ack_bit: bool) -> IdscpMessage {
+    let mut idscp_data = IdscpData::new();
+    idscp_data.data = Bytes::from(data);
+    idscp_data.alternating_bit = ack_bit;
+
+    let mut idscp = IdscpMessage::new();
+    idscp.set_idscpData(idscp_data);
+
     idscp
 }

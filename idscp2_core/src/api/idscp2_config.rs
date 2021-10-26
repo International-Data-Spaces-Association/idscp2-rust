@@ -1,5 +1,10 @@
 use std::time::Duration;
 
+pub struct IdscpConfig<'a> {
+    pub resend_timeout: Duration,
+    pub ra_config: &'a AttestationConfig,
+}
+
 pub struct AttestationConfig {
     // TODO integrate this with IDSCP2Configuration?
     // TODO: rename to "supported_provers" and "supported verifiers"
