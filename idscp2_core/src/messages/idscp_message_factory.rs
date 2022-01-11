@@ -1,5 +1,5 @@
 use super::idscpv2_messages::{
-    IdscpClose, IdscpClose_CloseCause, IdscpDat, IdscpData, IdscpHello, IdscpMessage,
+    IdscpAck, IdscpClose, IdscpClose_CloseCause, IdscpDat, IdscpData, IdscpHello, IdscpMessage,
     IdscpRaProver, IdscpRaVerifier,
 };
 use bytes::Bytes;
@@ -112,6 +112,16 @@ pub(crate) fn create_idscp_data(data: Vec<u8>, ack_bit: bool) -> IdscpMessage {
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpData(idscp_data);
+
+    idscp
+}
+
+pub(crate) fn create_idscp_ack(ack_bit: bool) -> IdscpMessage {
+    let mut idscp_ack = IdscpAck::new();
+    idscp_ack.alternating_bit = ack_bit;
+
+    let mut idscp = IdscpMessage::new();
+    idscp.set_idscpAck(idscp_ack);
 
     idscp
 }

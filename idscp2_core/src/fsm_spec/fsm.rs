@@ -2,6 +2,7 @@
 
 use std::marker::PhantomData;
 use std::time::Duration;
+use std::vec;
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
@@ -18,9 +19,9 @@ enum ProtocolState {
     Terminated,
 }
 
-pub(crate) enum FsmAction {
+pub(crate) enum FsmAction<'received_data> {
     SecureChannelAction(SecureChannelAction),
-    // NotifyUserData(Vec<u8>),
+    NotifyUserData(&'received_data [u8]),
     SetDatTimeout(Duration),
     SetRaTimeout(Duration),
     SetResendDataTimeout(Duration),
@@ -29,18 +30,18 @@ pub(crate) enum FsmAction {
 }
 
 pub(crate) enum RaMessage<RaType> {
-    Ok(Vec<u8>), // TODO: maybe make the inner type an Option<Vec<u8>> to not send packet with empty data
+    Ok(Vec<u8>), // TODO: make reference? // TODO: maybe make the inner type an Option<Vec<u8>> to not send packet with empty data,
     Failed(),
     RawData(Vec<u8>, PhantomData<RaType>),
 }
 
 #[allow(clippy::enum_variant_names)]
-pub(crate) enum FsmEvent {
+pub(crate) enum FsmEvent<'msg> {
     // USER EVENTS
     FromUpper(UserEvent),
 
     // SECURE CHANNEL EVENTS
-    FromSecureChannel(SecureChannelEvent),
+    FromSecureChannel(SecureChannelEvent<'msg>),
 
     // RA DRIVER EVENTS
     FromRaProver(RaMessage<RaProverType>),
@@ -64,20 +65,20 @@ impl Into<FsmIdscpMessageType> for &IdscpMessage {
 */
 
 #[derive(Debug)]
-pub(crate) enum SecureChannelEvent {
-    Message(IdscpMessage_oneof_message),
+pub(crate) enum SecureChannelEvent<'msg> {
+    Message(&'msg IdscpMessage_oneof_message),
 }
 
 #[derive(Debug)]
 pub(crate) enum SecureChannelAction {
-    Message(IdscpMessage),
+    Message(IdscpMessage), // TODO: make reference?
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum UserEvent {
     StartHandshake,
     // Stop,
-    Data(Vec<u8>),
+    Data(Vec<u8>), // TODO: make reference?
 }
 
 trait RaType {}
@@ -194,7 +195,10 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
     }
 
     //TODO: make returned Result a stack-allocated vector of FsmAction because we expect this Vector to be small (one or two elements)
-    pub(crate) fn process_event(&mut self, event: FsmEvent) -> Result<Vec<FsmAction>, FsmError> {
+    pub(crate) fn process_event<'event_data>(
+        &mut self,
+        event: FsmEvent<'event_data>,
+    ) -> Result<Vec<FsmAction<'event_data>>, FsmError> {
         let dat = self.daps_driver.is_valid();
         match (
             &self.state,
@@ -394,7 +398,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                         data,
                         AckBit::from_other_flipped(&self.last_ack_received).into(),
                     );
-                    self.last_data_sent.0.set(msg.get_idscpData().clone());
+                    self.last_data_sent.0.set(msg.get_idscpData().clone()); //TODO: maybe use (and clone) Boxes instead of cloning the data
                     self.resend_timeout = TimeoutState::Active;
                     Ok(vec![
                         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)),
@@ -419,7 +423,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 if let Some(resend_msg) = &self.last_data_sent.0.msg {
                     if self.last_ack_received != self.last_data_sent.0.get_ack_bit() {
                         let mut msg = IdscpMessage::new();
-                        msg.set_idscpData(resend_msg.clone());
+                        msg.set_idscpData(resend_msg.clone()); //TODO: maybe use (and clone) Boxes instead of cloning the data
                         Ok(vec![
                             FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)),
                             FsmAction::SetResendDataTimeout(self.config.resend_timeout), // Resetting the timout
@@ -432,6 +436,34 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 }
             }
 
+            // TLA Action ReceiveData
+            (
+                ProtocolState::Running,
+                RaState::Done,        // Prover state
+                RaState::Done,        // Verifier state
+                true,                 // DAT is valid?
+                TimeoutState::Active, // Dat timeout
+                TimeoutState::Active, // Ra timeout
+                _,                    // Resend timeout
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+                    IdscpMessage_oneof_message::idscpData(idscp_data),
+                )),
+            ) => {
+                if AckBit::from(idscp_data.get_alternating_bit())
+                    != self.last_data_received.0.get_ack_bit()
+                {
+                    self.last_data_received.0.set(idscp_data.clone()); //TODO: maybe use (and clone) Boxes instead of cloning the data
+                }
+
+                let ack_msg = idscp_message_factory::create_idscp_ack(bool::from(
+                    self.last_data_received.0.get_ack_bit(),
+                ));
+                Ok(vec![
+                    FsmAction::NotifyUserData(idscp_data.get_data()),
+                    FsmAction::SecureChannelAction(SecureChannelAction::Message(ack_msg)),
+                ])
+            }
+
             _ => unimplemented!(),
         }
     }
@@ -442,7 +474,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
     /// Therefore we need to make this check within the body of the match arm.
     /// If this check does not succeed, we call this method to have a common place to ignore events that do not trigger
     /// an action in the current FSM state.
-    fn no_matching_event(&self) -> Result<Vec<FsmAction>, FsmError> {
+    fn no_matching_event<'a>(&self) -> Result<Vec<FsmAction<'a>>, FsmError> {
         unimplemented!()
     }
 

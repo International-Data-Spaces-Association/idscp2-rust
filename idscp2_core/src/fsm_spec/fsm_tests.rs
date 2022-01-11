@@ -1,7 +1,7 @@
 use crate::{
     api::idscp2_config::{AttestationConfig, IdscpConfig},
     driver::daps_driver::DapsDriver,
-    messages::idscpv2_messages::IdscpMessage_oneof_message,
+    messages::{idscp_message_factory, idscpv2_messages::IdscpMessage_oneof_message},
 };
 use std::{marker::PhantomData, time::Duration, vec};
 
@@ -59,7 +59,7 @@ fn normal_sequence() {
     let idscp_hello = hello_msg.clone().message.unwrap();
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            idscp_hello,
+            &idscp_hello,
         )))
         .unwrap();
     assert!(actions.len() == 1);
@@ -83,7 +83,7 @@ fn normal_sequence() {
     let verif_msg = verif_msg.clone().message.unwrap();
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            verif_msg,
+            &verif_msg,
         )))
         .unwrap();
     assert!(actions.len() == 1);
@@ -107,7 +107,7 @@ fn normal_sequence() {
     let prover_msg = prover_msg.clone().message.unwrap();
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            prover_msg,
+            &prover_msg,
         )))
         .unwrap();
     assert!(actions.len() == 1);
@@ -162,11 +162,27 @@ fn normal_sequence() {
         }
         _ => panic!("expected IdscpData"),
     }
-    assert!(matches!(
-        msg.message.as_ref().unwrap(),
-        IdscpMessage_oneof_message::idscpData(_)
-    ));
     assert!(matches!(&actions[1], FsmAction::SetResendDataTimeout(_)));
+
+    // TLA Action ReceiveData
+    let msg = idscp_message_factory::create_idscp_data("foo bar".as_bytes().to_owned(), true);
+    let actions = fsm
+        .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+            msg.message.as_ref().unwrap(),
+        )))
+        .unwrap();
+    assert!(actions.len() == 2);
+    assert!(matches!(&actions[0], FsmAction::NotifyUserData(_)));
+    let msg = match &actions[1] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+    match msg.message.as_ref().unwrap() {
+        IdscpMessage_oneof_message::idscpAck(idscp_ack) => {
+            assert_eq!(idscp_ack.alternating_bit, true)
+        }
+        _ => panic!("expected IdscpAck"),
+    }
 
     // TLA Action ResendData
     let actions = fsm.process_event(FsmEvent::ResendTimout).unwrap();
@@ -181,9 +197,5 @@ fn normal_sequence() {
         }
         _ => panic!("expected IdscpData"),
     }
-    assert!(matches!(
-        msg.message.as_ref().unwrap(),
-        IdscpMessage_oneof_message::idscpData(_)
-    ));
     assert!(matches!(&actions[1], FsmAction::SetResendDataTimeout(_)));
 }
