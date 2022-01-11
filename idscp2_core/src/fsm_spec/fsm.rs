@@ -25,6 +25,7 @@ pub(crate) enum FsmAction<'received_data> {
     SetDatTimeout(Duration),
     SetRaTimeout(Duration),
     SetResendDataTimeout(Duration),
+    StopResendDataTimeout,
     ToProver(Vec<u8>),
     ToVerifier(Vec<u8>),
 }
@@ -462,6 +463,29 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     FsmAction::NotifyUserData(idscp_data.get_data()),
                     FsmAction::SecureChannelAction(SecureChannelAction::Message(ack_msg)),
                 ])
+            }
+
+            // TLA Action ReceiveAck
+            (
+                ProtocolState::Running,
+                _, // Prover state
+                _, // Verifier state
+                _, // DAT is valid?
+                _, // Dat timeout
+                _, // Ra timeout
+                _, // Resend timeout
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+                    IdscpMessage_oneof_message::idscpAck(idscp_ack),
+                )),
+            ) => {
+                let received_ack = AckBit::from(idscp_ack.alternating_bit);
+                if self.last_ack_received != received_ack {
+                    // can be simplified in the Spec.
+                    self.last_ack_received = received_ack;
+                    self.resend_timeout = TimeoutState::Inactive;
+                }
+
+                Ok(vec![FsmAction::StopResendDataTimeout])
             }
 
             _ => unimplemented!(),

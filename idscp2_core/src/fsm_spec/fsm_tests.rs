@@ -198,4 +198,13 @@ fn normal_sequence() {
         _ => panic!("expected IdscpData"),
     }
     assert!(matches!(&actions[1], FsmAction::SetResendDataTimeout(_)));
+
+    // TLA Action ReceiveAck
+    let msg = idscp_message_factory::create_idscp_ack(true);
+    let actions = fsm
+        .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+            msg.message.as_ref().unwrap(),
+        )))
+        .unwrap();
+    assert!(matches!(&actions[0], FsmAction::StopResendDataTimeout));
 }
