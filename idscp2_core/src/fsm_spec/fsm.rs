@@ -392,6 +392,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                         AckBit::from_other_flipped(&self.last_ack_received).into(),
                     );
                     self.last_data_sent.0.set(msg.get_idscpData().clone());
+                    self.resend_timeout = TimeoutState::Active;
                     Ok(vec![
                         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)),
                         FsmAction::SetResendDataTimeout(self.config.resend_timeout),
