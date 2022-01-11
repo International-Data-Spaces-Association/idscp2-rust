@@ -45,6 +45,9 @@ pub(crate) enum FsmEvent {
     // RA DRIVER EVENTS
     FromRaProver(RaMessage<RaProverType>),
     FromRaVerifier(RaMessage<RaVerifierType>),
+
+    // TIMEOUT EVENTS
+    ResendTimout,
 }
 
 /*pub(crate) enum FsmIdscpMessageType {
@@ -397,6 +400,33 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)),
                         FsmAction::SetResendDataTimeout(self.config.resend_timeout),
                     ])
+                } else {
+                    self.no_matching_event()
+                }
+            }
+
+            // TLA Action ResendData
+            (
+                ProtocolState::Running,
+                RaState::Done,        // Prover state
+                RaState::Done,        // Verifier state
+                true,                 // DAT is valid?
+                TimeoutState::Active, // Dat timeout
+                TimeoutState::Active, // Ra timeout
+                TimeoutState::Active, // Resend timeout
+                FsmEvent::ResendTimout,
+            ) => {
+                if let Some(resend_msg) = &self.last_data_sent.0.msg {
+                    if self.last_ack_received != self.last_data_sent.0.get_ack_bit() {
+                        let mut msg = IdscpMessage::new();
+                        msg.set_idscpData(resend_msg.clone());
+                        Ok(vec![
+                            FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)),
+                            FsmAction::SetResendDataTimeout(self.config.resend_timeout), // Resetting the timout
+                        ])
+                    } else {
+                        self.no_matching_event()
+                    }
                 } else {
                     self.no_matching_event()
                 }

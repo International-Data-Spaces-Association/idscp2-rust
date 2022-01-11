@@ -167,4 +167,23 @@ fn normal_sequence() {
         IdscpMessage_oneof_message::idscpData(_)
     ));
     assert!(matches!(&actions[1], FsmAction::SetResendDataTimeout(_)));
+
+    // TLA Action ResendData
+    let actions = fsm.process_event(FsmEvent::ResendTimout).unwrap();
+    assert!(actions.len() == 2);
+    let msg = match &actions[0] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+    match msg.message.as_ref().unwrap() {
+        IdscpMessage_oneof_message::idscpData(data) => {
+            assert_eq!(data.alternating_bit, true)
+        }
+        _ => panic!("expected IdscpData"),
+    }
+    assert!(matches!(
+        msg.message.as_ref().unwrap(),
+        IdscpMessage_oneof_message::idscpData(_)
+    ));
+    assert!(matches!(&actions[1], FsmAction::SetResendDataTimeout(_)));
 }
