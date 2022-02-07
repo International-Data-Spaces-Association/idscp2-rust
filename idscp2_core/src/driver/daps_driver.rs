@@ -33,4 +33,6 @@ pub trait DapsDriver {
         token: &[u8],
         //toDo security_requirements: Option<Self::SecurityReq>,
     ) -> Option<Duration>; //TODO return std::Duration
+
+    fn invalidate(&mut self);
 }

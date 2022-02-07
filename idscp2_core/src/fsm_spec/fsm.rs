@@ -25,6 +25,8 @@ pub(crate) enum FsmAction<'received_data> {
     SetDatTimeout(Duration),
     SetRaTimeout(Duration),
     SetResendDataTimeout(Duration),
+    StopDatTimeout,
+    StopRaTimeout,
     StopResendDataTimeout,
     ToProver(Vec<u8>),
     ToVerifier(Vec<u8>),
@@ -50,6 +52,7 @@ pub(crate) enum FsmEvent<'msg> {
 
     // TIMEOUT EVENTS
     ResendTimout,
+    DatExpired,
 }
 
 /*pub(crate) enum FsmIdscpMessageType {
@@ -78,8 +81,9 @@ pub(crate) enum SecureChannelAction {
 #[derive(Debug, Clone)]
 pub(crate) enum UserEvent {
     StartHandshake,
-    // Stop,
-    Data(Vec<u8>), // TODO: make reference?
+    CloseConnection,
+    RequestReattestation(&'static str), //includes cause
+    Data(Vec<u8>),                      // TODO: make reference?
 }
 
 trait RaType {}
@@ -357,7 +361,26 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 Ok(vec![send_action, ra_timeout_action])
             }
 
-            // TODO: TLA Action VerifierError
+            // TLA Action "VerifierError"
+            (
+                ProtocolState::Running,
+                _,                      // Prover state
+                RaState::Working,       // Verifier state
+                true,                   // DAT is valid?
+                TimeoutState::Active,   // Dat timeout
+                TimeoutState::Inactive, // Ra timeout
+                _,                      // Resend timeout
+                FsmEvent::FromRaVerifier(RaMessage::Failed()),
+            ) => {
+                let send_action = FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                    idscp_message_factory::create_idscp_close(
+                        IdscpClose_CloseCause::RA_VERIFIER_FAILED,
+                        "",
+                    ),
+                ));
+                self.cleanup();
+                Ok(vec![send_action])
+            }
 
             // TLA Action "ProverSuccess"
             // We need an action "ProverSuccess" which is not obviously represented in the specification!
@@ -379,9 +402,87 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 )])
             }
 
-            // TODO: TLA Action DatExpired
-            // TODO: TLA Action ReceiveDatExpired
-            // TODO: TLA Action ReceiveDat
+            // TLA Action DatExpired
+            (
+                ProtocolState::Running,
+                _,    // Prover state
+                _,    // Verifier state
+                true, // DAT is valid?
+                _,    // Dat timeout
+                _,    // Ra timeout
+                _,    // Resend timeout
+                FsmEvent::DatExpired,
+            ) => {
+                self.verifier = RaState::Inactive(PhantomData {});
+                self.daps_driver.invalidate();
+                self.ra_timeout = TimeoutState::Inactive;
+                self.dat_timeout = TimeoutState::Inactive;
+                let actions = vec![
+                    FsmAction::StopRaTimeout,
+                    FsmAction::StopDatTimeout,
+                    FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                        idscp_message_factory::create_idscp_dat_exp(),
+                    )),
+                ];
+                Ok(actions)
+            }
+
+            // TLA Action ReceiveDatExpired
+            (
+                ProtocolState::Running,
+                _, // Prover state
+                _, // Verifier state
+                _, // DAT is valid?
+                _, // Dat timeout
+                _, // Ra timeout
+                _, // Resend timeout
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+                    IdscpMessage_oneof_message::idscpDatExpired(_),
+                )),
+            ) => {
+                self.prover = RaState::Working;
+                let msg = FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                    idscp_message_factory::create_idscp_dat(
+                        self.daps_driver.get_token().into_bytes(),
+                    ),
+                ));
+                Ok(vec![msg])
+            }
+
+            // TLA Action ReceiveDat
+            (
+                ProtocolState::Running,
+                _,                      // Prover state
+                RaState::Inactive(_),   // Verifier state
+                false,                  // DAT is valid?
+                TimeoutState::Inactive, // Dat timeout
+                TimeoutState::Inactive, // Ra timeout
+                _,                      // Resend timeout
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+                    IdscpMessage_oneof_message::idscpDat(dat),
+                )),
+            ) => {
+                let mut actions = vec![];
+                match self.daps_driver.verify_token(dat.get_token()) {
+                    Some(dat_timeout) => {
+                        self.verifier = RaState::Working;
+                        self.dat_timeout = TimeoutState::Active;
+                        actions.push(FsmAction::SetDatTimeout(dat_timeout));
+                    }
+                    None => {
+                        actions.push(FsmAction::SecureChannelAction(
+                            SecureChannelAction::Message(
+                                idscp_message_factory::create_idscp_close(
+                                    IdscpClose_CloseCause::NO_VALID_DAT,
+                                    "",
+                                ),
+                            ),
+                        ));
+                        self.cleanup();
+                    }
+                }
+                Ok(actions)
+            }
 
             // TLA Action SendData
             (
@@ -486,6 +587,85 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 }
 
                 Ok(vec![FsmAction::StopResendDataTimeout])
+            }
+
+            // TLA Action CloseConnection
+            (
+                ProtocolState::Running | ProtocolState::WaitForHello,
+                _, // Prover state
+                _, // Verifier state
+                _, // DAT is valid?
+                _, // Dat timeout
+                _, // Ra timeout
+                _, // Resend timeout
+                FsmEvent::FromUpper(UserEvent::CloseConnection),
+            ) => {
+                let msg = FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                    idscp_message_factory::create_idscp_close(
+                        IdscpClose_CloseCause::USER_SHUTDOWN,
+                        "",
+                    ),
+                ));
+                self.cleanup();
+                Ok(vec![msg])
+            }
+
+            // TLA Action ReceiveClose
+            (
+                ProtocolState::Running | ProtocolState::WaitForHello,
+                _, // Prover state
+                _, // Verifier state
+                _, // DAT is valid?
+                _, // Dat timeout
+                _, // Ra timeout
+                _, // Resend timeout
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+                    IdscpMessage_oneof_message::idscpClose(_),
+                )),
+            ) => {
+                self.cleanup();
+                // TOOD: The other actors should probably be notified about that
+                Ok(vec![])
+            }
+
+            // TLA Action RequestReattestation
+            (
+                ProtocolState::Running,
+                _,                    // Prover state
+                RaState::Done,        // Verifier state
+                true,                 // DAT is valid?
+                TimeoutState::Active, // Dat timeout
+                TimeoutState::Active, // Ra timeout
+                _,                    // Resend timeout
+                FsmEvent::FromUpper(UserEvent::RequestReattestation(cause)),
+            ) => {
+                self.verifier = RaState::Working;
+                self.ra_timeout = TimeoutState::Inactive;
+                let actions = vec![
+                    FsmAction::StopRaTimeout,
+                    FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                        idscp_message_factory::create_idscp_re_rat(cause),
+                    )),
+                ];
+                Ok(actions)
+            }
+
+            // TLA Action ReceiveReattestation
+            (
+                ProtocolState::Running,
+                _, // Prover state
+                _, // Verifier state
+                _, // DAT is valid?
+                _, // Dat timeout
+                _, // Ra timeout
+                _, // Resend timeout
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+                    &IdscpMessage_oneof_message::idscpReRa(_),
+                )),
+            ) => {
+                self.prover = RaState::Working;
+                // TODO: the prover should probably be notified about that
+                Ok(vec![])
             }
 
             _ => unimplemented!(),

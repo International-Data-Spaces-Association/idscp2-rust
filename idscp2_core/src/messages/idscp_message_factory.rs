@@ -1,6 +1,6 @@
 use super::idscpv2_messages::{
-    IdscpAck, IdscpClose, IdscpClose_CloseCause, IdscpDat, IdscpData, IdscpHello, IdscpMessage,
-    IdscpRaProver, IdscpRaVerifier,
+    IdscpAck, IdscpClose, IdscpClose_CloseCause, IdscpDat, IdscpDatExpired, IdscpData, IdscpHello,
+    IdscpMessage, IdscpRaProver, IdscpRaVerifier, IdscpReRa,
 };
 use bytes::Bytes;
 use protobuf::SingularPtrField;
@@ -52,7 +52,6 @@ pub(crate) fn create_idscp_ra_verifier(data: Vec<u8>) -> IdscpMessage {
     idscp
 }
 
-/* just commenting out because i dont need it right now
 pub(crate) fn create_idscp_dat_exp() -> IdscpMessage {
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpDatExpired(IdscpDatExpired::new());
@@ -69,14 +68,15 @@ pub(crate) fn create_idscp_dat(dat: Vec<u8>) -> IdscpMessage {
 }
 
 pub(crate) fn create_idscp_re_rat(cause: &'static str) -> IdscpMessage {
-    let mut idscp_rerat = IdscpReRat::new();
+    let mut idscp_rerat = IdscpReRa::new();
     idscp_rerat.cause = String::from(cause);
 
     let mut idscp = IdscpMessage::new();
-    idscp.set_idscpReRat(idscp_rerat);
+    idscp.set_idscpReRa(idscp_rerat);
     idscp
 }
 
+/* just commenting out because i dont need it right now
 pub(crate) fn create_idscp_rat_prover(data: Vec<u8>) -> IdscpMessage {
     let mut idscp_p = IdscpRatProver::new();
     idscp_p.data = Bytes::from(data);
