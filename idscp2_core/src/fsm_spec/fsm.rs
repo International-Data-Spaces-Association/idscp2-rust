@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use bytes::Bytes;
 use std::marker::PhantomData;
 use std::time::Duration;
 use std::vec;
@@ -83,7 +84,7 @@ pub(crate) enum UserEvent {
     StartHandshake,
     CloseConnection,
     RequestReattestation(&'static str), //includes cause
-    Data(Vec<u8>),                      // TODO: make reference?
+    Data(Bytes),                        // ref-counted
 }
 
 trait RaType {}

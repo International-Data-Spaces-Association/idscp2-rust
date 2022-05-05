@@ -1,4 +1,6 @@
 use super::IdscpConnection;
+use crate::MAX_FRAME_SIZE;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -63,9 +65,10 @@ impl AsyncIdscpConnection {
         connection: &mut IdscpConnection,
         reader: &mut tokio::net::tcp::ReadHalf<'_>,
     ) -> std::io::Result<usize> {
-        let mut buf = [0u8; 1024];
-        let n = reader.read(&mut buf[..]).await?;
-        connection.read(&mut buf[..n])
+        // TODO no intransparent allocation during read function, maybe replace with arena?
+        let mut buf: BytesMut = BytesMut::with_capacity(MAX_FRAME_SIZE);
+        reader.read_buf(&mut buf).await?; // initial read "Copy"
+        connection.read(buf)
     }
 
     async fn write(
@@ -81,7 +84,7 @@ impl AsyncIdscpConnection {
         self.connection.is_connected()
     }
 
-    pub async fn send(&mut self, data: &[u8]) -> std::io::Result<usize> {
+    pub async fn send(&mut self, data: Bytes) -> std::io::Result<usize> {
         let n = self.connection.send(data)?;
         let (_, mut writer) = self.tcp_stream.split();
         Self::write(&mut self.connection, &mut writer).await?;
@@ -101,7 +104,8 @@ mod tests {
             let (connect_result, accept_result) = tokio::join!(
                 async {
                     let mut connection = AsyncIdscpConnection::connect("127.0.0.1:8080").await?;
-                    let n = connection.send(&[1, 2, 3, 4]).await?;
+                    let data = Bytes::from([1u8, 2, 3, 4].as_slice());
+                    let n = connection.send(data).await?;
                     assert!(n == 4);
                     Ok::<(), std::io::Error>(())
                 },

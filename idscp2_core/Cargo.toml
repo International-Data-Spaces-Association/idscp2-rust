@@ -14,7 +14,6 @@ thiserror = "1.0.30"
 log = "0.4.16"
 protobuf = { version = "2.27.1", features = ["with-bytes"] }
 bytes = "1.1.0"
-byteorder = "1.4.3"
 futures = "0.3.21"
 tokio = {version = "1.17.0", features = ["full"]}
 

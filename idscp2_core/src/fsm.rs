@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use thiserror::Error;
 
 pub(crate) enum FsmAction {
@@ -18,14 +19,14 @@ pub(crate) enum FsmEvent {
 pub(crate) enum SecureChannelEvent {
     // Close,
     Hello(String),
-    Data(Vec<u8>),
+    Data(Bytes),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum UserEvent {
     StartHandshake,
     // Stop,
-    Data(Vec<u8>),
+    Data(Bytes),
 }
 
 // FSM States

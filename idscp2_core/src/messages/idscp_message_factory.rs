@@ -77,7 +77,7 @@ pub(crate) fn create_idscp_re_rat(cause: &'static str) -> IdscpMessage {
 }
 
 /* just commenting out because i dont need it right now
-pub(crate) fn create_idscp_rat_prover(data: Vec<u8>) -> IdscpMessage {
+pub(crate) fn create_idscp_rat_prover(data: Bytes) -> IdscpMessage {
     let mut idscp_p = IdscpRatProver::new();
     idscp_p.data = Bytes::from(data);
 
@@ -96,18 +96,18 @@ pub(crate) fn create_idscp_rat_verifier(data: Vec<u8>) -> IdscpMessage {
 }
  */
 
-pub(crate) fn old_create_idscp_data(data: Vec<u8>) -> IdscpMessage {
+pub(crate) fn old_create_idscp_data(data: Bytes) -> IdscpMessage {
     let mut idscp_data = IdscpData::new();
-    idscp_data.data = Bytes::from(data);
+    idscp_data.data = data;
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpData(idscp_data);
     idscp
 }
 
-pub(crate) fn create_idscp_data(data: Vec<u8>, ack_bit: bool) -> IdscpMessage {
+pub(crate) fn create_idscp_data(data: Bytes, ack_bit: bool) -> IdscpMessage {
     let mut idscp_data = IdscpData::new();
-    idscp_data.data = Bytes::from(data);
+    idscp_data.data = data;
     idscp_data.alternating_bit = ack_bit;
 
     let mut idscp = IdscpMessage::new();

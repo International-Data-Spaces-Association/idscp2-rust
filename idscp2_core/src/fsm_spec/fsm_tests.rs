@@ -3,6 +3,7 @@ use crate::{
     driver::daps_driver::DapsDriver,
     messages::{idscp_message_factory, idscpv2_messages::IdscpMessage_oneof_message},
 };
+use bytes::Bytes;
 use std::{marker::PhantomData, time::Duration, vec};
 
 use super::fsm::*;
@@ -151,9 +152,9 @@ fn normal_sequence() {
 
     // TLA Action SendData
     let actions = fsm
-        .process_event(FsmEvent::FromUpper(UserEvent::Data(
-            "hello world!".as_bytes().to_owned(),
-        )))
+        .process_event(FsmEvent::FromUpper(UserEvent::Data(Bytes::from(
+            "hello world!",
+        ))))
         .unwrap();
     assert!(actions.len() == 2);
     let msg = match &actions[0] {
@@ -169,7 +170,7 @@ fn normal_sequence() {
     assert!(matches!(&actions[1], FsmAction::SetResendDataTimeout(_)));
 
     // TLA Action ReceiveData
-    let msg = idscp_message_factory::create_idscp_data("foo bar".as_bytes().to_owned(), true);
+    let msg = idscp_message_factory::create_idscp_data(Bytes::from("foo bar"), true);
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
             msg.message.as_ref().unwrap(),

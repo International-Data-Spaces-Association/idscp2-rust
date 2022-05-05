@@ -1,3 +1,5 @@
+extern crate core;
+
 pub mod api;
 mod chunkvec;
 mod driver;
@@ -6,37 +8,35 @@ mod fsm_spec;
 mod messages;
 pub mod tokio_idscp_connection;
 
-use byteorder::ByteOrder;
+use bytes::{Buf, Bytes, BytesMut};
 use chunkvec::ChunkVecBuffer;
 use fsm::*;
 use messages::{
     idscp_message_factory as msg_factory, idscpv2_messages::IdscpMessage,
     idscpv2_messages::IdscpMessage_oneof_message,
 };
-use protobuf::Message;
+use protobuf::{CodedOutputStream, Message};
 use std::convert::TryFrom;
-use std::io::Write;
+use std::io::{Error, ErrorKind, Write};
 
 type LengthPrefix = u32;
 const LENGTH_PREFIX_SIZE: usize = std::mem::size_of::<LengthPrefix>();
 
+/// The maximum frame size (including length prefix) supported by this implementation
+///
+/// This number impacts internal buffer sizes and restricts the maximum data message size.
+const MAX_FRAME_SIZE: usize = 4096;
+
 pub struct IdscpConnection {
     fsm: Fsm,
-    send_buffer_queue: ChunkVecBuffer,
+    send_queue: Vec<IdscpMessage>,
+    read_queue: ChunkVecBuffer<BytesMut>,
+    partial_read_len: Option<LengthPrefix>,
 }
 
 impl IdscpConnection {
     fn push_to_send_buffer(&mut self, msg: IdscpMessage) {
-        //TODO: optimize this to not create the "raw" buffer but to write directly to the end of the send_buffer?
-
-        let msg_length_32bit = msg.compute_size();
-        let mut msg_length_be = Vec::with_capacity(4);
-        msg_length_be.extend_from_slice(&msg_length_32bit.to_be_bytes());
-        self.send_buffer_queue.append(msg_length_be);
-
-        let mut raw = Vec::new();
-        msg.write_to_vec(&mut raw).unwrap();
-        self.send_buffer_queue.append(raw);
+        self.send_queue.push(msg);
     }
 
     fn do_action(&mut self, action: FsmAction) {
@@ -58,34 +58,77 @@ impl IdscpConnection {
     }
 
     pub fn wants_write(&self) -> bool {
-        !self.send_buffer_queue.is_empty()
+        !self.send_queue.is_empty()
     }
 
     pub fn write(&mut self, out: &mut dyn Write) -> std::io::Result<usize> {
-        self.send_buffer_queue.write_to(out)
+        let mut written = 0usize;
+
+        if !self.send_queue.is_empty() {
+            // Workaround: serialize without the wrapper method of IdscpMessage to initialize and
+            // use only a single buffer for length delimiters and messages
+            let mut os = CodedOutputStream::new(out);
+
+            for msg in self.send_queue.drain(..) {
+                let msg_length: u32 = msg.compute_size();
+                os.write_raw_bytes(msg_length.to_be_bytes().as_slice())?;
+                written += 4;
+                msg.check_initialized()?;
+                msg.write_to_with_cached_sizes(&mut os)?;
+                written += msg_length as usize;
+            }
+            os.flush()?;
+        }
+        Ok(written)
     }
 
-    pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let msg_length: LengthPrefix = if buf.len() >= LENGTH_PREFIX_SIZE {
-            byteorder::BigEndian::read_u32(&buf[..LENGTH_PREFIX_SIZE])
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "not enough bytes available to read length prefix",
-            ));
+    /// Consumes the buf and attempts to parse at least one message.
+    /// Does not return an error if the message could only be partially parsed, but only if there
+    /// is a critical error.
+    pub fn read(&mut self, buf: BytesMut) -> std::io::Result<usize> {
+        self.read_queue.append(buf);
+        self.parse_read_queue(0)
+    }
+
+    fn parse_read_queue(&mut self, parsed_bytes: usize) -> std::io::Result<usize> {
+        let msg_length: LengthPrefix = match self.partial_read_len.take() {
+            Some(len) => len,
+            None => {
+                if self.read_queue.len() >= LENGTH_PREFIX_SIZE {
+                    self.read_queue.get_u32()
+                } else {
+                    return Ok(parsed_bytes);
+                }
+            }
         };
 
-        let range_begin = LENGTH_PREFIX_SIZE;
-        let range_end = std::cmp::min(LENGTH_PREFIX_SIZE + (msg_length as usize), buf.len());
+        if self.read_queue.remaining() < msg_length as usize {
+            // not enough bytes available to parse message
+            self.partial_read_len = Some(msg_length);
+            return Ok(parsed_bytes);
+        }
 
-        if let Ok(msg) = IdscpMessage::parse_from_bytes(&buf[range_begin..range_end]) {
+        let mut frame = self.read_queue.pop().unwrap();
+
+        // extend frame, can be zero-copy if the original buffer was contiguous
+        while frame.len() < msg_length as usize {
+            let b = self.read_queue.pop().unwrap();
+            frame.unsplit(b);
+        }
+
+        // reinsert the remainder to the read queue
+        if frame.len() > msg_length as usize {
+            let rem = frame.split_off(msg_length as usize);
+            self.read_queue.insert_front(rem);
+        }
+
+        if let Ok(msg) = IdscpMessage::parse_from_carllerche_bytes(&frame.freeze()) {
             let m = msg.compute_size();
-            assert!(m == msg_length);
+            assert_eq!(m, msg_length);
             let msg_length = usize::try_from(m).unwrap();
             match self.process_new_msg(msg) {
                 Err(FsmError::UnknownTransition)  //ignore unexpected messages
-                | Ok(()) => Ok(LENGTH_PREFIX_SIZE + msg_length),
-
+                | Ok(()) => self.parse_read_queue(LENGTH_PREFIX_SIZE + msg_length),
                 Err(FsmError::NotConnected)=> Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"))
             }
         } else {
@@ -121,7 +164,9 @@ impl IdscpConnection {
             .expect("wrong fsm implementation?");
         let mut conn = IdscpConnection {
             fsm,
-            send_buffer_queue: ChunkVecBuffer::new(),
+            send_queue: vec![],
+            read_queue: Default::default(),
+            partial_read_len: None,
         };
         conn.do_action(action);
 
@@ -132,7 +177,9 @@ impl IdscpConnection {
         let fsm = Fsm::new(config);
         IdscpConnection {
             fsm,
-            send_buffer_queue: ChunkVecBuffer::new(),
+            send_queue: vec![],
+            read_queue: Default::default(),
+            partial_read_len: None,
         }
     }
 
@@ -140,18 +187,24 @@ impl IdscpConnection {
         self.fsm.is_connected()
     }
 
-    pub fn send(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        let msg: IdscpMessage = msg_factory::old_create_idscp_data(vec![]); // create empty package to determine size overhead of protobuf encapsulation
-        let header_size = msg.compute_size();
-        let buffer_space: usize = 42; // this is a fictive number, because we currently have an unbounded buffer that has no limits
-        let payload_space = buffer_space.saturating_sub(usize::try_from(header_size).unwrap());
-        let n = std::cmp::min(payload_space, data.len());
+    pub fn send(&mut self, data: Bytes) -> std::io::Result<usize> {
+        // the empty vector would not have worked, since the protobuf-encoded len of data also has
+        // variable length that needs to be accounted for
+        // no copy here, since data is ref-counted and dropped
+        let msg: IdscpMessage = msg_factory::old_create_idscp_data(data.clone()); // create empty package to determine size overhead of protobuf encapsulation
+        let frame_size = usize::try_from(msg.compute_size()).unwrap();
+        let buffer_space: usize = MAX_FRAME_SIZE;
 
-        let copy = data[..n].to_vec(); //TODO: only copy the data if IDSCP_DATA message is constructed
+        // TODO maybe split data here to MAX_FRAME_SIZE
+        if frame_size > buffer_space {
+            return Err(Error::from(ErrorKind::OutOfMemory));
+        }
+
+        let n = data.len();
 
         match self
             .fsm
-            .process_event(FsmEvent::FromUpper(UserEvent::Data(copy)))
+            .process_event(FsmEvent::FromUpper(UserEvent::Data(data)))
         {
             Ok(Some(action)) => {
                 self.do_action(action);
@@ -176,6 +229,7 @@ impl IdscpConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::{BufMut, BytesMut};
 
     #[test]
     fn establish_connection() {
@@ -184,17 +238,19 @@ mod tests {
         let mut peer2 = IdscpConnection::accept("peer2".into());
 
         const MTU: usize = 1500; // Maximum Transmission Unit
-        let mut channel1_2 = Vec::with_capacity(MTU);
-        let mut channel2_1 = Vec::with_capacity(MTU);
+        let mut channel1_2 = BytesMut::with_capacity(MTU);
+        let mut channel2_1 = BytesMut::with_capacity(MTU);
 
         while peer1.wants_write() || peer2.wants_write() {
             while peer1.wants_write() {
-                peer1.write(&mut channel1_2).unwrap();
+                let mut writer = channel1_2.writer();
+                peer1.write(&mut writer).unwrap();
+                channel1_2 = writer.into_inner();
             }
 
             let mut chunk_start = 0;
             while chunk_start < channel1_2.len() {
-                match peer2.read(&mut channel1_2[chunk_start..]) {
+                match peer2.read(channel1_2.split_to(channel1_2.len())) {
                     Ok(n) => chunk_start += n,
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -203,15 +259,17 @@ mod tests {
                     }
                 }
             }
-            channel1_2.clear();
+            channel1_2.reserve(MTU);
 
             while peer2.wants_write() {
-                peer2.write(&mut channel2_1).unwrap();
+                let mut writer = channel2_1.writer();
+                peer2.write(&mut writer).unwrap();
+                channel2_1 = writer.into_inner();
             }
 
             let mut chunk_start = 0;
             while chunk_start < channel2_1.len() {
-                match peer1.read(&mut channel2_1[chunk_start..]) {
+                match peer1.read(channel2_1.split_to(channel2_1.len())) {
                     Ok(n) => chunk_start += n,
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -220,13 +278,14 @@ mod tests {
                     }
                 }
             }
-            channel2_1.clear();
+            channel2_1.reserve(MTU);
         }
 
         assert!(peer1.is_connected() && channel1_2.is_empty());
         assert!(peer2.is_connected() && channel1_2.is_empty());
 
-        let n = peer1.send(b"hello world").unwrap();
+        let data = Bytes::from(b"hello world".as_slice());
+        let n = peer1.send(data).unwrap();
         assert!(n == 11 && peer1.wants_write())
     }
 }
