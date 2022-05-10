@@ -23,6 +23,7 @@ const LENGTH_PREFIX_SIZE: usize = std::mem::size_of::<LengthPrefix>();
 pub struct IdscpConnection {
     fsm: Fsm,
     send_buffer_queue: ChunkVecBuffer,
+    recv_buffer_queue: ChunkVecBuffer,
 }
 
 impl IdscpConnection {
@@ -53,6 +54,10 @@ impl IdscpConnection {
             FsmAction::SecureChannelAction(SecureChannelEvent::Data(data)) => {
                 let msg = msg_factory::old_create_idscp_data(data);
                 self.push_to_send_buffer(msg)
+            }
+
+            FsmAction::NotifyUserData(data) => {
+                self.recv_buffer_queue.append(data);
             }
         }
     }
@@ -104,6 +109,11 @@ impl IdscpConnection {
                 FsmEvent::FromSecureChannel(SecureChannelEvent::Hello("bla".to_string()))
             }
 
+            Some(IdscpMessage_oneof_message::idscpData(data)) => {
+                // introduced data copy
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Data(data.data.to_vec()))
+            }
+
             _ => unimplemented!(),
         };
         if let Some(action) = self.fsm.process_event(event)? {
@@ -113,26 +123,28 @@ impl IdscpConnection {
         Ok(())
     }
 
-    pub fn connect(config: String) -> IdscpConnection {
+    pub fn connect(config: String) -> Self {
         let mut fsm = Fsm::new(config);
         let action = fsm
             .process_event(FsmEvent::FromUpper(UserEvent::StartHandshake))
             .unwrap()
             .expect("wrong fsm implementation?");
-        let mut conn = IdscpConnection {
+        let mut conn = Self {
             fsm,
             send_buffer_queue: ChunkVecBuffer::new(),
+            recv_buffer_queue: ChunkVecBuffer::new(),
         };
         conn.do_action(action);
 
         conn
     }
 
-    pub fn accept(config: String) -> IdscpConnection {
+    pub fn accept(config: String) -> Self {
         let fsm = Fsm::new(config);
-        IdscpConnection {
+        Self {
             fsm,
             send_buffer_queue: ChunkVecBuffer::new(),
+            recv_buffer_queue: ChunkVecBuffer::new(),
         }
     }
 
@@ -171,14 +183,17 @@ impl IdscpConnection {
             )),
         }
     }
+
+    pub fn recv(&mut self) -> Option<Vec<u8>> {
+        self.recv_buffer_queue.pop()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn establish_connection() {
+    fn spawn_peers() -> std::io::Result<(IdscpConnection, IdscpConnection, Vec<u8>, Vec<u8>)> {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut peer1 = IdscpConnection::connect("peer1".into());
         let mut peer2 = IdscpConnection::accept("peer2".into());
@@ -223,10 +238,43 @@ mod tests {
             channel2_1.clear();
         }
 
+        return Ok((peer1, peer2, channel1_2, channel2_1));
+    }
+
+    #[test]
+    fn establish_connection() {
+        let (peer1, peer2, channel1_2, _channel2_1) = spawn_peers().unwrap();
+
         assert!(peer1.is_connected() && channel1_2.is_empty());
         assert!(peer2.is_connected() && channel1_2.is_empty());
+    }
 
-        let n = peer1.send(b"hello world").unwrap();
-        assert!(n == 11 && peer1.wants_write())
+    #[test]
+    fn transmit_data() {
+        let (mut peer1, mut peer2, mut channel1_2, mut _channel2_1) = spawn_peers().unwrap();
+
+        const MSG: &[u8; 11] = b"hello world";
+
+        let n = peer1.send(MSG).unwrap();
+        assert!(n == 11 && peer1.wants_write());
+        while peer1.wants_write() {
+            peer1.write(&mut channel1_2).unwrap();
+        }
+
+        let mut chunk_start = 0;
+        while chunk_start < channel1_2.len() {
+            match peer2.read(&mut channel1_2[chunk_start..]) {
+                Ok(n) => chunk_start += n,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        break;
+                    }
+                }
+            }
+        }
+        channel1_2.clear();
+
+        let recv_msg = peer2.recv().unwrap();
+        assert_eq!(MSG, recv_msg.as_slice());
     }
 }
