@@ -10,7 +10,7 @@ I did not find sufficient alternative crates, possible candidates i looked at we
  However, the ChunkVecBuffer also is no fixed-size allocation.
 */
 
-use bytes::{Buf};
+use bytes::Buf;
 use std::cmp;
 use std::collections::VecDeque;
 use std::io;
@@ -154,7 +154,7 @@ impl<T: Deref<Target = [u8]>> ChunkVecBuffer<T> {
         let len = bytes.len();
 
         if !bytes.is_empty() {
-            self.chunks.push_back(bytes);
+            self.chunks.push_front(bytes);
         }
 
         len
