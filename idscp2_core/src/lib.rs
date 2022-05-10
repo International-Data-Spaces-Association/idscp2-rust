@@ -32,6 +32,7 @@ pub struct IdscpConnection {
     send_queue: Vec<IdscpMessage>,
     read_queue: ChunkVecBuffer<BytesMut>,
     partial_read_len: Option<LengthPrefix>,
+    recv_buffer_queue: ChunkVecBuffer<Bytes>,
 }
 
 impl IdscpConnection {
@@ -53,6 +54,10 @@ impl IdscpConnection {
             FsmAction::SecureChannelAction(SecureChannelEvent::Data(data)) => {
                 let msg = msg_factory::old_create_idscp_data(data);
                 self.push_to_send_buffer(msg)
+            }
+
+            FsmAction::NotifyUserData(data) => {
+                self.recv_buffer_queue.append(data);
             }
         }
     }
@@ -147,6 +152,10 @@ impl IdscpConnection {
                 FsmEvent::FromSecureChannel(SecureChannelEvent::Hello("bla".to_string()))
             }
 
+            Some(IdscpMessage_oneof_message::idscpData(data)) => {
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Data(data.data))
+            }
+
             _ => unimplemented!(),
         };
         if let Some(action) = self.fsm.process_event(event)? {
@@ -156,16 +165,17 @@ impl IdscpConnection {
         Ok(())
     }
 
-    pub fn connect(config: String) -> IdscpConnection {
+    pub fn connect(config: String) -> Self {
         let mut fsm = Fsm::new(config);
         let action = fsm
             .process_event(FsmEvent::FromUpper(UserEvent::StartHandshake))
             .unwrap()
             .expect("wrong fsm implementation?");
-        let mut conn = IdscpConnection {
+        let mut conn = Self {
             fsm,
             send_queue: vec![],
             read_queue: Default::default(),
+            recv_buffer_queue: Default::default(),
             partial_read_len: None,
         };
         conn.do_action(action);
@@ -173,12 +183,13 @@ impl IdscpConnection {
         conn
     }
 
-    pub fn accept(config: String) -> IdscpConnection {
+    pub fn accept(config: String) -> Self {
         let fsm = Fsm::new(config);
-        IdscpConnection {
+        Self {
             fsm,
             send_queue: vec![],
             read_queue: Default::default(),
+            recv_buffer_queue: Default::default(),
             partial_read_len: None,
         }
     }
@@ -224,15 +235,19 @@ impl IdscpConnection {
             )),
         }
     }
+
+    pub fn recv(&mut self) -> Option<Bytes> {
+        self.recv_buffer_queue.pop()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::{BufMut, BytesMut};
+    use std::ops::Deref;
 
-    #[test]
-    fn establish_connection() {
+    fn spawn_peers() -> std::io::Result<(IdscpConnection, IdscpConnection, BytesMut, BytesMut)> {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut peer1 = IdscpConnection::connect("peer1".into());
         let mut peer2 = IdscpConnection::accept("peer2".into());
@@ -281,11 +296,47 @@ mod tests {
             channel2_1.reserve(MTU);
         }
 
+        return Ok((peer1, peer2, channel1_2, channel2_1));
+    }
+
+    #[test]
+    fn establish_connection() {
+        let (peer1, peer2, channel1_2, _channel2_1) = spawn_peers().unwrap();
+
         assert!(peer1.is_connected() && channel1_2.is_empty());
         assert!(peer2.is_connected() && channel1_2.is_empty());
+    }
+
+    #[test]
+    fn transmit_data() {
+        let (mut peer1, mut peer2, mut channel1_2, mut _channel2_1) = spawn_peers().unwrap();
+
+        const MSG: &[u8; 11] = b"hello world";
+
+        let n = peer1.send(Bytes::from(MSG.as_slice())).unwrap();
+        assert!(n == 11 && peer1.wants_write());
+        while peer1.wants_write() {
+            let mut writer = channel1_2.writer();
+            peer1.write(&mut writer).unwrap();
+            channel1_2 = writer.into_inner();
+        }
 
         let data = Bytes::from(b"hello world".as_slice());
         let n = peer1.send(data).unwrap();
-        assert!(n == 11 && peer1.wants_write())
+        assert!(n == 11 && peer1.wants_write());
+        let mut chunk_start = 0;
+        while chunk_start < channel1_2.len() {
+            match peer2.read(channel1_2.split_to(channel1_2.len())) {
+                Ok(n) => chunk_start += n,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let recv_msg = peer2.recv().unwrap();
+        assert_eq!(MSG, recv_msg.deref());
     }
 }

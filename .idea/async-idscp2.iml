@@ -6,6 +6,7 @@
       <sourceFolder url="file://$MODULE_DIR$/idscp2_core/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/idscp2_core/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/idscp2_core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/idscp2_core/benches" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/idscp2_default_drivers/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/idscp2_default_drivers/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/idscp2_tests/tests" isTestSource="true" />
