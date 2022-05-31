@@ -20,6 +20,11 @@ use std::io::Write;
 type LengthPrefix = u32;
 const LENGTH_PREFIX_SIZE: usize = std::mem::size_of::<LengthPrefix>();
 
+/// The maximum frame size (including length prefix) supported by this implementation
+///
+/// This number impacts internal buffer sizes and restricts the maximum data message size.
+const MAX_FRAME_SIZE: usize = 4096;
+
 pub struct IdscpConnection {
     fsm: Fsm,
     send_buffer_queue: ChunkVecBuffer,
@@ -71,34 +76,44 @@ impl IdscpConnection {
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let msg_length: LengthPrefix = if buf.len() >= LENGTH_PREFIX_SIZE {
-            byteorder::BigEndian::read_u32(&buf[..LENGTH_PREFIX_SIZE])
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "not enough bytes available to read length prefix",
-            ));
-        };
+        let mut read: usize = 0;
 
-        let range_begin = LENGTH_PREFIX_SIZE;
-        let range_end = std::cmp::min(LENGTH_PREFIX_SIZE + (msg_length as usize), buf.len());
+        while read < buf.len() {
+            let msg_length: LengthPrefix = if buf.len() - read >= LENGTH_PREFIX_SIZE {
+                byteorder::BigEndian::read_u32(&buf[read..(read+LENGTH_PREFIX_SIZE)])
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "not enough bytes available to read length prefix",
+                ));
+            };
 
-        if let Ok(msg) = IdscpMessage::parse_from_bytes(&buf[range_begin..range_end]) {
-            let m = msg.compute_size();
-            assert!(m == msg_length);
-            let msg_length = usize::try_from(m).unwrap();
-            match self.process_new_msg(msg) {
-                Err(FsmError::UnknownTransition)  //ignore unexpected messages
-                | Ok(()) => Ok(LENGTH_PREFIX_SIZE + msg_length),
+            let range_begin = read + LENGTH_PREFIX_SIZE;
+            let range_end = std::cmp::min(range_begin + (msg_length as usize), buf.len());
 
-                Err(FsmError::NotConnected)=> Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"))
+            if let Ok(msg) = IdscpMessage::parse_from_bytes(&buf[range_begin..range_end]) {
+                let m = msg.compute_size();
+                assert!(m == msg_length);
+                let msg_length = usize::try_from(m).unwrap();
+                match self.process_new_msg(msg) {
+                    Err(FsmError::UnknownTransition)  //ignore unexpected messages
+                    | Ok(()) => {
+                        read += LENGTH_PREFIX_SIZE + msg_length;
+                    },
+
+                    Err(FsmError::NotConnected)=> {
+                        return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"));
+                    }
+                }
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "could not decode idscp message",
+                ));
             }
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "could not decode idscp message",
-            ))
         }
+
+        Ok(read)
     }
 
     pub fn process_new_msg(&mut self, msg: IdscpMessage) -> Result<(), FsmError> {
@@ -155,7 +170,7 @@ impl IdscpConnection {
     pub fn send(&mut self, data: &[u8]) -> std::io::Result<usize> {
         let msg: IdscpMessage = msg_factory::old_create_idscp_data(vec![]); // create empty package to determine size overhead of protobuf encapsulation
         let header_size = msg.compute_size();
-        let buffer_space: usize = 42; // this is a fictive number, because we currently have an unbounded buffer that has no limits
+        let buffer_space: usize = MAX_FRAME_SIZE;
         let payload_space = buffer_space.saturating_sub(usize::try_from(header_size).unwrap());
         let n = std::cmp::min(payload_space, data.len());
 
