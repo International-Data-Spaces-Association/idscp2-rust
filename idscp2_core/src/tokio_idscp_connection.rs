@@ -29,6 +29,7 @@ pub struct AsyncIdscpConnection {
     tcp_stream: TcpStream,
     connection: IdscpConnection,
 }
+
 impl AsyncIdscpConnection {
     pub async fn connect(addr: &'static str) -> std::io::Result<Self> {
         let mut tcp_stream = TcpStream::connect(addr).await?;
@@ -61,9 +62,9 @@ impl AsyncIdscpConnection {
         Ok::<(), std::io::Error>(())
     }
 
-    async fn read(
+    async fn read<T: AsyncReadExt + Unpin>(
         connection: &mut IdscpConnection,
-        reader: &mut tokio::net::tcp::ReadHalf<'_>,
+        reader: &mut T,
     ) -> std::io::Result<usize> {
         // TODO no intransparent allocation during read function, maybe replace with arena?
         let mut buf: BytesMut = BytesMut::with_capacity(MAX_FRAME_SIZE);
@@ -71,9 +72,9 @@ impl AsyncIdscpConnection {
         connection.read(buf)
     }
 
-    async fn write(
+    pub async fn write<T: AsyncWriteExt + Unpin>(
         connection: &mut IdscpConnection,
-        writer: &mut tokio::net::tcp::WriteHalf<'_>,
+        writer: &mut T,
     ) -> std::io::Result<()> {
         let mut buf = Vec::new(); // TODO: use a statically sized array here?
         let _n = connection.write(&mut buf)?;
@@ -91,6 +92,16 @@ impl AsyncIdscpConnection {
         Ok(n)
     }
 
+    pub async fn send_to<T: AsyncWriteExt + Unpin>(
+        &mut self,
+        writer: &mut T,
+        data: Bytes,
+    ) -> std::io::Result<usize> {
+        let n = self.connection.send(data)?;
+        Self::write(&mut self.connection, writer).await?;
+        Ok(n)
+    }
+
     pub async fn recv(&mut self) -> std::io::Result<Option<Bytes>> {
         match self.connection.recv() {
             Some(msg) => Ok(Some(msg)),
@@ -100,6 +111,14 @@ impl AsyncIdscpConnection {
                 Ok(self.connection.recv())
             }
         }
+    }
+
+    pub async fn recv_from<T: AsyncReadExt + Unpin>(
+        &mut self,
+        reader: &mut T,
+    ) -> std::io::Result<Option<Bytes>> {
+        Self::read::<T>(&mut self.connection, reader).await?;
+        Ok(self.connection.recv())
     }
 }
 
@@ -223,13 +242,44 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_size_1024() {
-        const TRANSMISSION_SIZE: usize = 200_000;
-        const FIXED_CHUNK_SIZE: usize = 2_000;
+    fn test_transfer_size_1000() {
+        const TRANSMISSION_SIZE: usize = 10000;
+        const FIXED_CHUNK_SIZE: usize = 1000;
 
         let res = tokio_test::block_on(async {
             let (mut peer1, mut peer2) = spawn_connection().await;
             transfer(&mut peer1, &mut peer2, TRANSMISSION_SIZE, FIXED_CHUNK_SIZE).await
+        });
+
+        assert_ok!(res);
+        assert!(res.unwrap())
+    }
+
+    async fn send(
+        peer1: &mut AsyncIdscpConnection,
+        transmission_size: usize,
+        chunk_size: usize,
+    ) -> Result<bool, std::io::Error> {
+        let mut data = BytesMut::from(random_data(transmission_size).as_slice());
+        let mut sink = tokio::io::sink();
+
+        while !data.is_empty() {
+            let msg = data.split_to(chunk_size);
+            let n = peer1.send_to(&mut sink, msg.freeze()).await?;
+            assert_eq!(n, chunk_size);
+        }
+
+        Ok(data.is_empty())
+    }
+
+    #[test]
+    fn test_send_size_1000() {
+        const TRANSMISSION_SIZE: usize = 200_000;
+        const FIXED_CHUNK_SIZE: usize = 1000;
+
+        let res = tokio_test::block_on(async {
+            let (mut peer1, mut _peer2) = spawn_connection().await;
+            send(&mut peer1, TRANSMISSION_SIZE, FIXED_CHUNK_SIZE).await
         });
 
         assert_ok!(res);
