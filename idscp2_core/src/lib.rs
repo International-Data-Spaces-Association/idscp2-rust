@@ -80,7 +80,7 @@ impl IdscpConnection {
 
         while read < buf.len() {
             let msg_length: LengthPrefix = if buf.len() - read >= LENGTH_PREFIX_SIZE {
-                byteorder::BigEndian::read_u32(&buf[read..(read+LENGTH_PREFIX_SIZE)])
+                byteorder::BigEndian::read_u32(&buf[read..(read + LENGTH_PREFIX_SIZE)])
             } else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
