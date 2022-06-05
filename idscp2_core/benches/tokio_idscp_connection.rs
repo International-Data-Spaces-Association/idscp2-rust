@@ -1,4 +1,4 @@
-use bytes::{BytesMut};
+use bytes::BytesMut;
 use idscp2_core::tokio_idscp_connection::{AsyncIdscpConnection, AsyncIdscpListener};
 use rand::{thread_rng, Fill};
 
@@ -35,26 +35,26 @@ async fn transfer(
     let mut cmp_data = data.clone();
 
     tokio::try_join!(
-            async {
-                while !cmp_data.is_empty() {
-                    let msg = peer2.recv().await.unwrap();
-                    if let Some(msg) = msg {
-                        assert_eq!(msg.len(), chunk_size);
-                        let cmp_msg = cmp_data.split_to(chunk_size);
-                        assert_eq!(std::convert::AsRef::as_ref(&msg), cmp_msg.as_ref());
-                    }
+        async {
+            while !cmp_data.is_empty() {
+                let msg = peer2.recv().await.unwrap();
+                if let Some(msg) = msg {
+                    assert_eq!(msg.len(), chunk_size);
+                    let cmp_msg = cmp_data.split_to(chunk_size);
+                    assert_eq!(std::convert::AsRef::as_ref(&msg), cmp_msg.as_ref());
                 }
-                Ok::<(), std::io::Error>(())
-            },
-            async {
-                while !data.is_empty() {
-                    let msg = data.split_to(chunk_size);
-                    let n = peer1.send(black_box(msg.freeze())).await?;
-                    assert!(n == chunk_size);
-                }
-                Ok::<(), std::io::Error>(())
-            },
-        )?;
+            }
+            Ok::<(), std::io::Error>(())
+        },
+        async {
+            while !data.is_empty() {
+                let msg = data.split_to(chunk_size);
+                let n = peer1.send(black_box(msg.freeze())).await?;
+                assert!(n == chunk_size);
+            }
+            Ok::<(), std::io::Error>(())
+        },
+    )?;
 
     Ok(data.is_empty() && cmp_data.is_empty())
 }
@@ -86,8 +86,14 @@ fn bench_transfer_size_1000(c: &mut Criterion) {
         b.iter(|| {
             tokio_test::block_on(async {
                 let (mut peer1, mut peer2) = spawn_connection().await;
-                transfer(&mut peer1, &mut peer2, black_box(data.clone()), FIXED_CHUNK_SIZE)
-                    .await.unwrap()
+                transfer(
+                    &mut peer1,
+                    &mut peer2,
+                    black_box(data.clone()),
+                    FIXED_CHUNK_SIZE,
+                )
+                .await
+                .unwrap()
             })
         })
     });

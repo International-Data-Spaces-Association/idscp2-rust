@@ -8,8 +8,8 @@ use std::{marker::PhantomData, time::Duration, vec};
 
 use super::fsm::*;
 
-struct TestDaps {
-    is_valid: bool,
+pub(crate) struct TestDaps {
+    pub(crate) is_valid: bool,
 }
 
 impl DapsDriver for TestDaps {
@@ -64,7 +64,7 @@ fn normal_sequence() {
     let idscp_hello = hello_msg.clone().message.unwrap();
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            &idscp_hello,
+            idscp_hello,
         )))
         .unwrap();
     assert!(actions.len() == 1);
@@ -88,7 +88,7 @@ fn normal_sequence() {
     let verif_msg = verif_msg.clone().message.unwrap();
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            &verif_msg,
+            verif_msg,
         )))
         .unwrap();
     assert!(actions.len() == 1);
@@ -112,7 +112,7 @@ fn normal_sequence() {
     let prover_msg = prover_msg.clone().message.unwrap();
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            &prover_msg,
+            prover_msg,
         )))
         .unwrap();
     assert!(actions.len() == 1);
@@ -173,7 +173,7 @@ fn normal_sequence() {
     let msg = idscp_message_factory::create_idscp_data(Bytes::from("foo bar"), true);
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            msg.message.as_ref().unwrap(),
+            msg.message.unwrap(),
         )))
         .unwrap();
     assert!(actions.len() == 2);
@@ -208,7 +208,7 @@ fn normal_sequence() {
     let msg = idscp_message_factory::create_idscp_ack(true);
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            msg.message.as_ref().unwrap(),
+            msg.message.unwrap(),
         )))
         .unwrap();
     assert!(matches!(&actions[0], FsmAction::StopResendDataTimeout));
@@ -231,7 +231,7 @@ fn normal_sequence() {
     let msg = dat_exp_msg.clone().message.unwrap();
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            &msg,
+            msg,
         )))
         .unwrap();
     assert!(actions.len() == 1);
@@ -248,7 +248,7 @@ fn normal_sequence() {
     let msg = dat_msg.clone().message.unwrap();
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            &msg,
+            msg,
         )))
         .unwrap();
     assert!(actions.len() == 1);
@@ -305,7 +305,7 @@ fn normal_sequence() {
     let msg = re_ra_msg.clone().message.unwrap();
     let actions = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            &msg,
+            msg,
         )))
         .unwrap();
     assert!(actions.is_empty());
@@ -349,7 +349,7 @@ fn verifier_error_sequence() {
     let idscp_hello = hello_msg.clone().message.unwrap();
     let _ = fsm
         .process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
-            &idscp_hello,
+            idscp_hello,
         )))
         .unwrap();
 

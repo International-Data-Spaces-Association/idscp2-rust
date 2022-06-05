@@ -1,5 +1,5 @@
 use super::IdscpConnection;
-use crate::MAX_FRAME_SIZE;
+use crate::{DapsDriver, IdscpConfig, MAX_FRAME_SIZE};
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -13,9 +13,13 @@ impl AsyncIdscpListener {
         Ok(AsyncIdscpListener { tcp_listener })
     }
 
-    pub async fn accept(&self) -> std::io::Result<AsyncIdscpConnection> {
+    pub async fn accept<'a>(
+        &self,
+        daps_driver: &'a mut dyn DapsDriver,
+        config: &'a IdscpConfig<'a>,
+    ) -> std::io::Result<AsyncIdscpConnection<'a>> {
         let (mut tcp_stream, _) = self.tcp_listener.accept().await.unwrap();
-        let mut connection = IdscpConnection::accept(String::from("acceptor"));
+        let mut connection = IdscpConnection::accept(daps_driver, config);
         AsyncIdscpConnection::start_handshake(&mut connection, &mut tcp_stream).await?;
 
         Ok(AsyncIdscpConnection {
@@ -25,15 +29,19 @@ impl AsyncIdscpListener {
     }
 }
 
-pub struct AsyncIdscpConnection {
+pub struct AsyncIdscpConnection<'fsm> {
     tcp_stream: TcpStream,
-    connection: IdscpConnection,
+    connection: IdscpConnection<'fsm>,
 }
 
-impl AsyncIdscpConnection {
-    pub async fn connect(addr: &'static str) -> std::io::Result<Self> {
+impl<'fsm> AsyncIdscpConnection<'fsm> {
+    pub async fn connect(
+        addr: &'static str,
+        daps_driver: &'fsm mut dyn DapsDriver,
+        config: &'fsm IdscpConfig<'fsm>,
+    ) -> std::io::Result<AsyncIdscpConnection<'fsm>> {
         let mut tcp_stream = TcpStream::connect(addr).await?;
-        let mut connection = IdscpConnection::connect("connector".to_string());
+        let mut connection = IdscpConnection::connect(daps_driver, config);
 
         Self::start_handshake(&mut connection, &mut tcp_stream).await?;
 
@@ -43,8 +51,8 @@ impl AsyncIdscpConnection {
         })
     }
 
-    async fn start_handshake(
-        connection: &mut IdscpConnection,
+    async fn start_handshake<'a>(
+        connection: &mut IdscpConnection<'a>,
         stream: &mut TcpStream,
     ) -> std::io::Result<()> {
         let (mut reader, mut writer) = stream.split();
@@ -62,8 +70,8 @@ impl AsyncIdscpConnection {
         Ok::<(), std::io::Error>(())
     }
 
-    async fn read<T: AsyncReadExt + Unpin>(
-        connection: &mut IdscpConnection,
+    async fn read<'a, T: AsyncReadExt + Unpin>(
+        connection: &mut IdscpConnection<'a>,
         reader: &mut T,
     ) -> std::io::Result<usize> {
         // TODO no intransparent allocation during read function, maybe replace with arena?
@@ -72,8 +80,8 @@ impl AsyncIdscpConnection {
         connection.read(buf)
     }
 
-    pub async fn write<T: AsyncWriteExt + Unpin>(
-        connection: &mut IdscpConnection,
+    pub async fn write<'a, T: AsyncWriteExt + Unpin>(
+        connection: &mut IdscpConnection<'a>,
         writer: &mut T,
     ) -> std::io::Result<()> {
         let mut buf = Vec::new(); // TODO: use a statically sized array here?
@@ -125,10 +133,24 @@ impl AsyncIdscpConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ops::Deref;
     use bytes::BytesMut;
     use rand::{thread_rng, Fill};
+    use std::ops::Deref;
+    use std::time::Duration;
     use tokio_test::assert_ok;
+    use crate::api::idscp2_config::AttestationConfig;
+    use crate::fsm_spec::fsm_tests::TestDaps;
+
+    const TEST_RA_CONFIG: AttestationConfig = AttestationConfig {
+        supported_attestation_suite: vec![],
+        expected_attestation_suite: vec![],
+        ra_timeout: Duration::from_secs(20),
+    };
+
+    const TEST_CONFIG: IdscpConfig = IdscpConfig {
+        resend_timeout: Duration::from_secs(20),
+        ra_config: &TEST_RA_CONFIG,
+    };
 
     #[test]
     fn async_establish_connection() {
@@ -137,13 +159,18 @@ mod tests {
             let listener = AsyncIdscpListener::bind("127.0.0.1:8080").await.unwrap();
             let (connect_result, accept_result) = tokio::join!(
                 async {
-                    let mut connection = AsyncIdscpConnection::connect("127.0.0.1:8080").await?;
+                    let mut daps_driver = TestDaps { is_valid: true };
+                    let mut connection = AsyncIdscpConnection::connect("127.0.0.1:8080", &mut daps_driver, &TEST_CONFIG).await?;
                     let data = Bytes::from([1u8, 2, 3, 4].as_slice());
                     let n = connection.send(data).await?;
                     assert!(n == 4);
                     Ok::<(), std::io::Error>(())
                 },
-                listener.accept()
+                async {
+                    let mut daps_driver = TestDaps { is_valid: true };
+                    listener.accept(&mut daps_driver, &TEST_CONFIG).await?;
+                    Ok::<(), std::io::Error>(())
+                }
             );
 
             assert!(connect_result.is_ok());
@@ -165,13 +192,15 @@ mod tests {
             let listener = AsyncIdscpListener::bind("127.0.0.1:8081").await.unwrap();
             let (connect_result, accept_result) = tokio::join!(
                 async {
-                    let mut connection = AsyncIdscpConnection::connect("127.0.0.1:8081").await?;
+                    let mut daps_driver = TestDaps { is_valid: true };
+                    let mut connection = AsyncIdscpConnection::connect("127.0.0.1:8081", &mut daps_driver, &TEST_CONFIG).await?;
                     let n = connection.send(Bytes::from(MSG.as_slice())).await?;
                     assert!(n == 4);
                     Ok::<(), std::io::Error>(())
                 },
                 async {
-                    let mut connection = listener.accept().await.unwrap();
+                    let mut daps_driver = TestDaps { is_valid: true };
+                    let mut connection = listener.accept(&mut daps_driver, &TEST_CONFIG).await.unwrap();
                     // sleep(Duration::from_secs(1));
                     let msg = connection.recv().await.unwrap().unwrap();
                     assert_eq!(msg.deref(), MSG);
@@ -194,11 +223,11 @@ mod tests {
         data
     }
 
-    async fn spawn_connection() -> (AsyncIdscpConnection, AsyncIdscpConnection) {
+    async fn spawn_connection<'a>(daps_driver_1: &'a mut dyn DapsDriver, daps_driver_2: &'a mut dyn DapsDriver, config: &'a IdscpConfig<'a>) -> (AsyncIdscpConnection<'a>, AsyncIdscpConnection<'a>) {
         let listener = AsyncIdscpListener::bind("127.0.0.1:8080").await.unwrap();
         let (connect_result, accept_result) = tokio::join!(
-            AsyncIdscpConnection::connect("127.0.0.1:8080"),
-            listener.accept()
+            AsyncIdscpConnection::connect("127.0.0.1:8080", daps_driver_1, config),
+            listener.accept(daps_driver_2, config),
         );
 
         assert_ok!(&connect_result);
@@ -208,8 +237,8 @@ mod tests {
     }
 
     async fn transfer(
-        peer1: &mut AsyncIdscpConnection,
-        peer2: &mut AsyncIdscpConnection,
+        peer1: &mut AsyncIdscpConnection<'_>,
+        peer2: &mut AsyncIdscpConnection<'_>,
         transmission_size: usize,
         chunk_size: usize,
     ) -> Result<bool, std::io::Error> {
@@ -247,7 +276,9 @@ mod tests {
         const FIXED_CHUNK_SIZE: usize = 1000;
 
         let res = tokio_test::block_on(async {
-            let (mut peer1, mut peer2) = spawn_connection().await;
+            let mut daps_driver_1 = TestDaps { is_valid: true };
+            let mut daps_driver_2 = TestDaps { is_valid: true };
+            let (mut peer1, mut peer2) = spawn_connection(&mut daps_driver_1, &mut daps_driver_2, &TEST_CONFIG).await;
             transfer(&mut peer1, &mut peer2, TRANSMISSION_SIZE, FIXED_CHUNK_SIZE).await
         });
 
@@ -256,7 +287,7 @@ mod tests {
     }
 
     async fn send(
-        peer1: &mut AsyncIdscpConnection,
+        peer1: &mut AsyncIdscpConnection<'_>,
         transmission_size: usize,
         chunk_size: usize,
     ) -> Result<bool, std::io::Error> {
@@ -278,7 +309,9 @@ mod tests {
         const FIXED_CHUNK_SIZE: usize = 1000;
 
         let res = tokio_test::block_on(async {
-            let (mut peer1, mut _peer2) = spawn_connection().await;
+            let mut daps_driver_1 = TestDaps { is_valid: true };
+            let mut daps_driver_2 = TestDaps { is_valid: true };
+            let (mut peer1, mut _peer2) = spawn_connection(&mut daps_driver_1, &mut daps_driver_2, &TEST_CONFIG).await;
             send(&mut peer1, TRANSMISSION_SIZE, FIXED_CHUNK_SIZE).await
         });
 

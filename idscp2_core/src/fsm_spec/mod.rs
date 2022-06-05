@@ -1,4 +1,4 @@
-mod fsm;
+pub(crate) mod fsm;
 
 #[cfg(test)]
-mod fsm_tests;
+pub(crate) mod fsm_tests;
