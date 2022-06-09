@@ -133,13 +133,13 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::idscp2_config::AttestationConfig;
+    use crate::fsm_spec::fsm_tests::TestDaps;
     use bytes::BytesMut;
     use rand::{thread_rng, Fill};
     use std::ops::Deref;
     use std::time::Duration;
     use tokio_test::assert_ok;
-    use crate::api::idscp2_config::AttestationConfig;
-    use crate::fsm_spec::fsm_tests::TestDaps;
 
     const TEST_RA_CONFIG: AttestationConfig = AttestationConfig {
         supported_attestation_suite: vec![],
@@ -160,7 +160,12 @@ mod tests {
             let (connect_result, accept_result) = tokio::join!(
                 async {
                     let mut daps_driver = TestDaps { is_valid: true };
-                    let mut connection = AsyncIdscpConnection::connect("127.0.0.1:8080", &mut daps_driver, &TEST_CONFIG).await?;
+                    let mut connection = AsyncIdscpConnection::connect(
+                        "127.0.0.1:8080",
+                        &mut daps_driver,
+                        &TEST_CONFIG,
+                    )
+                    .await?;
                     let data = Bytes::from([1u8, 2, 3, 4].as_slice());
                     let n = connection.send(data).await?;
                     assert!(n == 4);
@@ -193,14 +198,22 @@ mod tests {
             let (connect_result, accept_result) = tokio::join!(
                 async {
                     let mut daps_driver = TestDaps { is_valid: true };
-                    let mut connection = AsyncIdscpConnection::connect("127.0.0.1:8081", &mut daps_driver, &TEST_CONFIG).await?;
+                    let mut connection = AsyncIdscpConnection::connect(
+                        "127.0.0.1:8081",
+                        &mut daps_driver,
+                        &TEST_CONFIG,
+                    )
+                    .await?;
                     let n = connection.send(Bytes::from(MSG.as_slice())).await?;
                     assert!(n == 4);
                     Ok::<(), std::io::Error>(())
                 },
                 async {
                     let mut daps_driver = TestDaps { is_valid: true };
-                    let mut connection = listener.accept(&mut daps_driver, &TEST_CONFIG).await.unwrap();
+                    let mut connection = listener
+                        .accept(&mut daps_driver, &TEST_CONFIG)
+                        .await
+                        .unwrap();
                     // sleep(Duration::from_secs(1));
                     let msg = connection.recv().await.unwrap().unwrap();
                     assert_eq!(msg.deref(), MSG);
@@ -223,7 +236,11 @@ mod tests {
         data
     }
 
-    async fn spawn_connection<'a>(daps_driver_1: &'a mut dyn DapsDriver, daps_driver_2: &'a mut dyn DapsDriver, config: &'a IdscpConfig<'a>) -> (AsyncIdscpConnection<'a>, AsyncIdscpConnection<'a>) {
+    async fn spawn_connection<'a>(
+        daps_driver_1: &'a mut dyn DapsDriver,
+        daps_driver_2: &'a mut dyn DapsDriver,
+        config: &'a IdscpConfig<'a>,
+    ) -> (AsyncIdscpConnection<'a>, AsyncIdscpConnection<'a>) {
         let listener = AsyncIdscpListener::bind("127.0.0.1:8080").await.unwrap();
         let (connect_result, accept_result) = tokio::join!(
             AsyncIdscpConnection::connect("127.0.0.1:8080", daps_driver_1, config),
@@ -278,7 +295,8 @@ mod tests {
         let res = tokio_test::block_on(async {
             let mut daps_driver_1 = TestDaps { is_valid: true };
             let mut daps_driver_2 = TestDaps { is_valid: true };
-            let (mut peer1, mut peer2) = spawn_connection(&mut daps_driver_1, &mut daps_driver_2, &TEST_CONFIG).await;
+            let (mut peer1, mut peer2) =
+                spawn_connection(&mut daps_driver_1, &mut daps_driver_2, &TEST_CONFIG).await;
             transfer(&mut peer1, &mut peer2, TRANSMISSION_SIZE, FIXED_CHUNK_SIZE).await
         });
 
@@ -311,7 +329,8 @@ mod tests {
         let res = tokio_test::block_on(async {
             let mut daps_driver_1 = TestDaps { is_valid: true };
             let mut daps_driver_2 = TestDaps { is_valid: true };
-            let (mut peer1, mut _peer2) = spawn_connection(&mut daps_driver_1, &mut daps_driver_2, &TEST_CONFIG).await;
+            let (mut peer1, mut _peer2) =
+                spawn_connection(&mut daps_driver_1, &mut daps_driver_2, &TEST_CONFIG).await;
             send(&mut peer1, TRANSMISSION_SIZE, FIXED_CHUNK_SIZE).await
         });
 

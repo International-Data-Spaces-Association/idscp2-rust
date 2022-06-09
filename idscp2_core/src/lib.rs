@@ -45,7 +45,7 @@ impl<'fsm> IdscpConnection<'fsm> {
     }
 
     #[inline]
-    fn do_action_vec(&mut self, action_vec: Vec<FsmAction>) {
+    fn do_action_vec<T: IntoIterator<Item = FsmAction>>(&mut self, action_vec: T) {
         for action in action_vec {
             self.do_action(action);
         }
@@ -59,6 +59,9 @@ impl<'fsm> IdscpConnection<'fsm> {
             }
             FsmAction::NotifyUserData(data) => {
                 self.recv_buffer_queue.append(data);
+            }
+            FsmAction::SetDatTimeout(_timeout) => {
+                // unimplemented
             }
             a => {
                 unimplemented!("Tasked to perform {:?}", a);
@@ -172,6 +175,7 @@ impl<'fsm> IdscpConnection<'fsm> {
         conn
     }
 
+    // TODO possibly redundant
     pub fn accept(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
         let fsm = Fsm::new(daps_driver, config);
         Self {
@@ -250,10 +254,13 @@ mod tests {
         ra_config: &TEST_RA_CONFIG,
     };
 
-    fn spawn_peers<'a>(daps_driver_1: &'a mut dyn DapsDriver, daps_driver_2: &'a mut dyn DapsDriver) -> std::io::Result<(IdscpConnection<'a>, IdscpConnection<'a>, BytesMut, BytesMut)> {
+    fn spawn_peers<'a>(
+        daps_driver_1: &'a mut dyn DapsDriver,
+        daps_driver_2: &'a mut dyn DapsDriver,
+    ) -> std::io::Result<(IdscpConnection<'a>, IdscpConnection<'a>, BytesMut, BytesMut)> {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut peer1 = IdscpConnection::connect(daps_driver_1, &TEST_CONFIG);
-        let mut peer2 = IdscpConnection::accept(daps_driver_2, &TEST_CONFIG);
+        let mut peer2 = IdscpConnection::connect(daps_driver_2, &TEST_CONFIG);
 
         const MTU: usize = 1500; // Maximum Transmission Unit
         let mut channel1_2 = BytesMut::with_capacity(MTU);
@@ -309,7 +316,8 @@ mod tests {
     fn establish_connection() {
         let mut daps_driver_1 = TestDaps { is_valid: false };
         let mut daps_driver_2 = TestDaps { is_valid: false };
-        let (peer1, peer2, channel1_2, _channel2_1) = spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
+        let (peer1, peer2, channel1_2, _channel2_1) =
+            spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
 
         assert!(peer1.is_connected() && channel1_2.is_empty());
         assert!(peer2.is_connected() && channel1_2.is_empty());
@@ -319,7 +327,8 @@ mod tests {
     fn transmit_data() {
         let mut daps_driver_1 = TestDaps { is_valid: false };
         let mut daps_driver_2 = TestDaps { is_valid: false };
-        let (mut peer1, mut peer2, mut channel1_2, _channel2_1) = spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
+        let (mut peer1, mut peer2, mut channel1_2, _channel2_1) =
+            spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
 
         const MSG: &[u8; 11] = b"hello world";
 
