@@ -84,6 +84,10 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         connection: &mut IdscpConnection<'a>,
         writer: &mut T,
     ) -> std::io::Result<()> {
+        /* FIXME this is triple-buffered: messages buffered in the connection are written via an
+           internal buffer to buf which implements std::io::Write and from there to the actual
+           async writer
+        */
         let mut buf = Vec::new(); // TODO: use a statically sized array here?
         let _n = connection.write(&mut buf)?;
         writer.write_all(&buf).await

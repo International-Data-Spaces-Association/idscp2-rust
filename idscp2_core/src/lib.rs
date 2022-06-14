@@ -2,6 +2,7 @@ extern crate core;
 
 use std::convert::TryFrom;
 use std::io::{Error, ErrorKind, Write};
+use std::time::Instant;
 
 use bytes::{Buf, Bytes, BytesMut};
 use protobuf::{CodedOutputStream, Message};
@@ -12,12 +13,9 @@ use chunkvec::ChunkVecBuffer;
 use fsm_spec::fsm::*;
 use messages::{idscp_message_factory as msg_factory, idscpv2_messages::IdscpMessage};
 
-use crate::fsm::FsmError;
-
 pub mod api;
 mod chunkvec;
 mod driver;
-mod fsm;
 mod fsm_spec;
 mod messages;
 pub mod tokio_idscp_connection;
@@ -32,69 +30,59 @@ const LENGTH_PREFIX_SIZE: usize = std::mem::size_of::<LengthPrefix>();
 const MAX_FRAME_SIZE: usize = 4096;
 
 pub struct IdscpConnection<'fsm> {
+    /// state machine
     fsm: Fsm<'fsm, 'fsm>,
+    /// internal buffer of messages to be sent to the connected peer
     send_queue: Vec<IdscpMessage>,
+    /// internal buffer of partial bytes  received from the connected peer
     read_queue: ChunkVecBuffer<BytesMut>,
+    /// length of the next expected, but partially received frame from the connected peer
     partial_read_len: Option<LengthPrefix>,
-    recv_buffer_queue: ChunkVecBuffer<Bytes>,
+    /// internal buffer of payload parsed from the connected peer to be received
+    recv_queue: ChunkVecBuffer<Bytes>,
+
+    // Timeouts
+    dat_timeout: Option<Instant>,
 }
 
 impl<'fsm> IdscpConnection<'fsm> {
-    fn push_to_send_buffer(&mut self, msg: IdscpMessage) {
-        self.send_queue.push(msg);
+    /// Returns a new initialized `IdscpConnection` ready to communicate with another peer
+    pub fn connect(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
+        let mut fsm = Fsm::new(daps_driver, config);
+        let actions = fsm
+            .process_event(FsmEvent::FromUpper(UserEvent::StartHandshake))
+            .unwrap();
+        let mut conn = Self {
+            fsm,
+            send_queue: vec![],
+            read_queue: Default::default(),
+            recv_queue: Default::default(),
+            partial_read_len: None,
+            dat_timeout: None,
+        };
+        conn.do_actions(actions);
+
+        conn
     }
 
-    #[inline]
-    fn do_action_vec<T: IntoIterator<Item = FsmAction>>(&mut self, action_vec: T) {
-        for action in action_vec {
-            self.do_action(action);
+    // TODO possibly redundant
+    pub fn accept(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
+        let fsm = Fsm::new(daps_driver, config);
+        Self {
+            fsm,
+            send_queue: vec![],
+            read_queue: Default::default(),
+            recv_queue: Default::default(),
+            partial_read_len: None,
+            dat_timeout: None,
         }
     }
 
-    #[inline]
-    fn do_action(&mut self, action: FsmAction) {
-        match action {
-            FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => {
-                self.push_to_send_buffer(msg);
-            }
-            FsmAction::NotifyUserData(data) => {
-                self.recv_buffer_queue.append(data);
-            }
-            FsmAction::SetDatTimeout(_timeout) => {
-                // unimplemented
-            }
-            a => {
-                unimplemented!("Tasked to perform {:?}", a);
-            }
-        }
+    pub fn is_connected(&self) -> bool {
+        self.fsm.is_connected()
     }
 
-    pub fn wants_write(&self) -> bool {
-        !self.send_queue.is_empty()
-    }
-
-    pub fn write(&mut self, out: &mut dyn Write) -> std::io::Result<usize> {
-        let mut written = 0usize;
-
-        if !self.send_queue.is_empty() {
-            // Workaround: serialize without the wrapper method of IdscpMessage to initialize and
-            // use only a single buffer for length delimiters and messages
-            let mut os = CodedOutputStream::new(out);
-
-            for msg in self.send_queue.drain(..) {
-                let msg_length: u32 = msg.compute_size();
-                os.write_raw_bytes(msg_length.to_be_bytes().as_slice())?;
-                written += 4;
-                msg.check_initialized()?;
-                msg.write_to_with_cached_sizes(&mut os)?;
-                written += msg_length as usize;
-            }
-            os.flush()?;
-        }
-        Ok(written)
-    }
-
-    /// Consumes the buf and attempts to parse at least one message.
+    /// Consumes `buf` and attempts to parse at least one message frame from another peer.
     /// Does not return an error if the message could only be partially parsed, but only if there
     /// is a critical error.
     pub fn read(&mut self, buf: BytesMut) -> std::io::Result<usize> {
@@ -102,6 +90,7 @@ impl<'fsm> IdscpConnection<'fsm> {
         self.parse_read_queue(0)
     }
 
+    /// Recursively parses and processes messages from the internal read buffer
     fn parse_read_queue(&mut self, parsed_bytes: usize) -> std::io::Result<usize> {
         let msg_length: LengthPrefix = match self.partial_read_len.take() {
             Some(len) => len,
@@ -138,7 +127,7 @@ impl<'fsm> IdscpConnection<'fsm> {
             let m = msg.compute_size();
             assert_eq!(m, msg_length);
             let msg_length = usize::try_from(m).unwrap();
-            match self.process_new_msg(msg) {
+            match self.process_msg(msg) {
                 Err(FsmError::UnknownTransition)  //ignore unexpected messages
                 | Ok(()) => self.parse_read_queue(LENGTH_PREFIX_SIZE + msg_length),
                 Err(FsmError::NotConnected) => Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"))
@@ -151,46 +140,78 @@ impl<'fsm> IdscpConnection<'fsm> {
         }
     }
 
-    pub fn process_new_msg(&mut self, msg: IdscpMessage) -> Result<(), FsmError> {
+    /// passes a message frame to the internal FSM and executes any returned actions
+    fn process_msg(&mut self, msg: IdscpMessage) -> Result<(), FsmError> {
         let event = FsmEvent::FromSecureChannel(SecureChannelEvent::Message(msg.message.unwrap()));
-        let actions = self.fsm.process_event(event)?;
-        self.do_action_vec(actions);
+        self.process_event(event)?;
         Ok(())
     }
 
-    pub fn connect(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
-        let mut fsm = Fsm::new(daps_driver, config);
-        let actions = fsm
-            .process_event(FsmEvent::FromUpper(UserEvent::StartHandshake))
-            .unwrap();
-        let mut conn = Self {
-            fsm,
-            send_queue: vec![],
-            read_queue: Default::default(),
-            recv_buffer_queue: Default::default(),
-            partial_read_len: None,
-        };
-        conn.do_action_vec(actions);
+    fn process_event(&mut self, event: FsmEvent) -> Result<(), FsmError> {
+        let now = Instant::now();
 
-        conn
+        // check timeouts
+        if let Some(timeout) = &self.dat_timeout {
+            if timeout < &now {
+                self.fsm.process_event(FsmEvent::DatExpired)?;
+            }
+        }
+
+        let actions = self.fsm.process_event(event)?;
+        self.do_actions(actions);
+        Ok(())
     }
 
-    // TODO possibly redundant
-    pub fn accept(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
-        let fsm = Fsm::new(daps_driver, config);
-        Self {
-            fsm,
-            send_queue: vec![],
-            read_queue: Default::default(),
-            recv_buffer_queue: Default::default(),
-            partial_read_len: None,
+    #[inline]
+    fn do_actions<T: IntoIterator<Item = FsmAction>>(&mut self, action_vec: T) {
+        for action in action_vec {
+            match action {
+                FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => {
+                    // push outgoing message to send queue
+                    self.send_queue.push(msg);
+                }
+                FsmAction::NotifyUserData(data) => {
+                    self.recv_queue.append(data);
+                }
+                FsmAction::SetDatTimeout(timeout) => {
+                    self.dat_timeout = Some(Instant::now() + timeout);
+                }
+                a => {
+                    unimplemented!("Tasked to perform {:?}", a);
+                }
+            }
         }
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.fsm.is_connected()
+    /// Synchronously returns whether the connection has buffered message frames to be sent to
+    /// the connected peer.
+    pub fn wants_write(&self) -> bool {
+        !self.send_queue.is_empty()
     }
 
+    /// Writes the buffered message frames destined to the connected peer to `out`.
+    pub fn write(&mut self, out: &mut dyn Write) -> std::io::Result<usize> {
+        let mut written = 0usize;
+
+        if self.wants_write() {
+            // Workaround: serialize without the wrapper method of IdscpMessage to initialize and
+            // use only a single buffer for length delimiters and messages
+            let mut os = CodedOutputStream::new(out);
+
+            for msg in self.send_queue.drain(..) {
+                let msg_length: u32 = msg.compute_size();
+                os.write_raw_bytes(msg_length.to_be_bytes().as_slice())?;
+                written += 4;
+                msg.check_initialized()?;
+                msg.write_to_with_cached_sizes(&mut os)?;
+                written += msg_length as usize;
+            }
+            os.flush()?;
+        }
+        Ok(written)
+    }
+
+    /// Sends `data` to the connected peer.
     pub fn send(&mut self, data: Bytes) -> std::io::Result<usize> {
         // the empty vector would not have worked, since the protobuf-encoded len of data also has
         // variable length that needs to be accounted for
@@ -206,29 +227,21 @@ impl<'fsm> IdscpConnection<'fsm> {
 
         let n = data.len();
 
-        match self
-            .fsm
-            .process_event(FsmEvent::FromUpper(UserEvent::Data(data)))
-        {
-            Ok(actions) => {
-                self.do_action_vec(actions);
-                Ok(n)
-            }
-
-            Err(FsmError::UnknownTransition) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "unknown transition",
-            )),
-
-            Err(FsmError::NotConnected) => Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "would block",
-            )),
-        }
+        self.process_event(FsmEvent::FromUpper(UserEvent::Data(data)))
+            .map_err(|e| match e {
+                FsmError::UnknownTransition => {
+                    std::io::Error::new(std::io::ErrorKind::Other, "unknown transition")
+                }
+                FsmError::NotConnected => {
+                    std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block")
+                }
+            })?;
+        Ok(n)
     }
 
+    /// Returns optional data received from the connected peer
     pub fn recv(&mut self) -> Option<Bytes> {
-        self.recv_buffer_queue.pop()
+        self.recv_queue.pop()
     }
 }
 

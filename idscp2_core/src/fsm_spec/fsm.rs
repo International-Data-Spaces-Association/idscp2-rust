@@ -4,10 +4,10 @@ use bytes::Bytes;
 use std::marker::PhantomData;
 use std::time::Duration;
 use tinyvec::{array_vec, ArrayVec};
+use thiserror::Error;
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
-use crate::fsm::FsmError;
 use crate::messages::idscp_message_factory;
 use crate::messages::idscpv2_messages::{
     IdscpClose_CloseCause, IdscpData, IdscpMessage, IdscpMessage_oneof_message,
@@ -65,6 +65,16 @@ pub(crate) enum FsmEvent {
     // TIMEOUT EVENTS
     ResendTimout,
     DatExpired,
+}
+
+#[derive(Error, Debug)]
+pub enum FsmError {
+    #[error("No transition available for the given event")]
+    UnknownTransition,
+    #[error(
+    "Action failed because FSM was started but is currently not connected. Try it later again"
+    )]
+    NotConnected,
 }
 
 /*pub(crate) enum FsmIdscpMessageType {
@@ -415,9 +425,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 self.prover = RaState::Done;
                 let msg = idscp_message_factory::create_idscp_ra_prover(msg);
-                let action = FsmAction::SecureChannelAction(
-                    SecureChannelAction::Message(msg),
-                );
+                let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
                 Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
             }
 
