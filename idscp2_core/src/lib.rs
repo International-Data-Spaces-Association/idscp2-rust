@@ -9,6 +9,7 @@ use protobuf::{CodedOutputStream, Message};
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
+use crate::UserEvent::RequestReattestation;
 use chunkvec::ChunkVecBuffer;
 use fsm_spec::fsm::*;
 use messages::{idscp_message_factory as msg_factory, idscpv2_messages::IdscpMessage};
@@ -19,6 +20,7 @@ mod driver;
 mod fsm_spec;
 mod messages;
 pub mod tokio_idscp_connection;
+mod util;
 
 type LengthPrefix = u32;
 
@@ -43,6 +45,8 @@ pub struct IdscpConnection<'fsm> {
 
     // Timeouts
     dat_timeout: Option<Instant>,
+    ra_timeout: Option<Instant>,
+    reset_data_timeout: Option<Instant>,
 }
 
 impl<'fsm> IdscpConnection<'fsm> {
@@ -59,6 +63,8 @@ impl<'fsm> IdscpConnection<'fsm> {
             recv_queue: Default::default(),
             partial_read_len: None,
             dat_timeout: None,
+            ra_timeout: None,
+            reset_data_timeout: None,
         };
         conn.do_actions(actions);
 
@@ -75,6 +81,8 @@ impl<'fsm> IdscpConnection<'fsm> {
             recv_queue: Default::default(),
             partial_read_len: None,
             dat_timeout: None,
+            ra_timeout: None,
+            reset_data_timeout: None,
         }
     }
 
@@ -82,9 +90,96 @@ impl<'fsm> IdscpConnection<'fsm> {
         self.fsm.is_connected()
     }
 
+    pub fn is_verified(&self) -> bool {
+        self.fsm.is_verified()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.fsm.is_ready()
+    }
+
+    /// Checks internal timeouts and issues all actions required to return the internal state
+    /// machine to a state where data can be transferred again.
+    pub fn check_timeouts(&mut self) {
+        let now = Instant::now();
+
+        // check timeouts
+        // Note: the order is important, since some timeouts may be cancelled out by other timeouts.
+        // unwrap() is called since we expect the fsm to never fail expired timouts, though this may
+        // be changed.
+        if let Some(timeout) = &self.dat_timeout {
+            if timeout < &now {
+                self.process_event(FsmEvent::DatExpired).unwrap();
+            }
+        }
+        if let Some(timeout) = &self.ra_timeout {
+            if timeout < &now {
+                self.process_event(FsmEvent::FromUpper(RequestReattestation("timeout")))
+                    .unwrap();
+            }
+        }
+        if let Some(timeout) = &self.reset_data_timeout {
+            if timeout < &now {
+                self.process_event(FsmEvent::ResendTimout).unwrap();
+            }
+        }
+    }
+
+    fn process_event(&mut self, event: FsmEvent) -> Result<(), FsmError> {
+        let actions = self.fsm.process_event(event)?;
+        self.do_actions(actions);
+        Ok(())
+    }
+
+    #[inline]
+    fn do_actions<T: IntoIterator<Item = FsmAction>>(&mut self, action_vec: T) {
+        for action in action_vec {
+            match action {
+                FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => {
+                    // push outgoing message to send queue
+                    self.send_queue.push(msg);
+                }
+                FsmAction::NotifyUserData(data) => {
+                    self.recv_queue.append(data);
+                }
+                FsmAction::SetDatTimeout(timeout) => {
+                    self.dat_timeout = Some(Instant::now() + timeout);
+
+                    // TODO temporary implementation
+                    self.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(vec![])))
+                        .unwrap();
+                }
+                FsmAction::StopDatTimeout => {
+                    self.dat_timeout = None;
+                }
+                FsmAction::SetRaTimeout(timeout) => {
+                    self.ra_timeout = Some(Instant::now() + timeout);
+                }
+                FsmAction::StopRaTimeout => {
+                    self.ra_timeout = None;
+                }
+                FsmAction::SetResendDataTimeout(timeout) => {
+                    self.reset_data_timeout = Some(Instant::now() + timeout);
+                }
+                FsmAction::StopResendDataTimeout => {
+                    self.reset_data_timeout = None;
+                }
+                FsmAction::ToProver(_msg) => {
+                    // TODO temporary implementation
+                    self.process_event(FsmEvent::FromRaProver(RaMessage::Ok(vec![])))
+                        .unwrap();
+                }
+
+                a => {
+                    unimplemented!("Tasked to perform {:?}", a);
+                }
+            }
+        }
+    }
+
     /// Consumes `buf` and attempts to parse at least one message frame from another peer.
     /// Does not return an error if the message could only be partially parsed, but only if there
-    /// is a critical error.
+    /// is a critical error. Does not check for internal timeouts.
     pub fn read(&mut self, buf: BytesMut) -> std::io::Result<usize> {
         self.read_queue.append(buf);
         self.parse_read_queue(0)
@@ -127,59 +222,20 @@ impl<'fsm> IdscpConnection<'fsm> {
             let m = msg.compute_size();
             assert_eq!(m, msg_length);
             let msg_length = usize::try_from(m).unwrap();
-            match self.process_msg(msg) {
+            let event =
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(msg.message.unwrap()));
+
+            match self.process_event(event) {
                 Err(FsmError::UnknownTransition)  //ignore unexpected messages
                 | Ok(()) => self.parse_read_queue(LENGTH_PREFIX_SIZE + msg_length),
-                Err(FsmError::NotConnected) => Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block"))
+                Err(FsmError::NotConnected) => Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block")),
+                Err(FsmError::AwaitingReply) => panic!("Unexpected FsmError::AwaitingReply from FSM while processing messages from remote"),
             }
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "could not decode idscp message",
             ))
-        }
-    }
-
-    /// passes a message frame to the internal FSM and executes any returned actions
-    fn process_msg(&mut self, msg: IdscpMessage) -> Result<(), FsmError> {
-        let event = FsmEvent::FromSecureChannel(SecureChannelEvent::Message(msg.message.unwrap()));
-        self.process_event(event)?;
-        Ok(())
-    }
-
-    fn process_event(&mut self, event: FsmEvent) -> Result<(), FsmError> {
-        let now = Instant::now();
-
-        // check timeouts
-        if let Some(timeout) = &self.dat_timeout {
-            if timeout < &now {
-                self.fsm.process_event(FsmEvent::DatExpired)?;
-            }
-        }
-
-        let actions = self.fsm.process_event(event)?;
-        self.do_actions(actions);
-        Ok(())
-    }
-
-    #[inline]
-    fn do_actions<T: IntoIterator<Item = FsmAction>>(&mut self, action_vec: T) {
-        for action in action_vec {
-            match action {
-                FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => {
-                    // push outgoing message to send queue
-                    self.send_queue.push(msg);
-                }
-                FsmAction::NotifyUserData(data) => {
-                    self.recv_queue.append(data);
-                }
-                FsmAction::SetDatTimeout(timeout) => {
-                    self.dat_timeout = Some(Instant::now() + timeout);
-                }
-                a => {
-                    unimplemented!("Tasked to perform {:?}", a);
-                }
-            }
         }
     }
 
@@ -212,6 +268,7 @@ impl<'fsm> IdscpConnection<'fsm> {
     }
 
     /// Sends `data` to the connected peer.
+    /// Does not check for internal timeouts.
     pub fn send(&mut self, data: Bytes) -> std::io::Result<usize> {
         // the empty vector would not have worked, since the protobuf-encoded len of data also has
         // variable length that needs to be accounted for
@@ -234,6 +291,10 @@ impl<'fsm> IdscpConnection<'fsm> {
                 }
                 FsmError::NotConnected => {
                     std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block")
+                }
+                FsmError::AwaitingReply => {
+                    // TODO replace with meaningful io::Error
+                    std::io::Error::new(std::io::ErrorKind::WouldBlock, "awaiting reply")
                 }
             })?;
         Ok(n)
@@ -280,14 +341,12 @@ mod tests {
         let mut channel2_1 = BytesMut::with_capacity(MTU);
 
         while peer1.wants_write() || peer2.wants_write() {
-            println!("peer1 write");
             while peer1.wants_write() {
                 let mut writer = channel1_2.writer();
                 peer1.write(&mut writer).unwrap();
                 channel1_2 = writer.into_inner();
             }
 
-            println!("peer2 read");
             let mut chunk_start = 0;
             while chunk_start < channel1_2.len() {
                 match peer2.read(channel1_2.split_to(channel1_2.len())) {
@@ -301,7 +360,6 @@ mod tests {
             }
             channel1_2.reserve(MTU);
 
-            println!("peer2 write");
             while peer2.wants_write() {
                 let mut writer = channel2_1.writer();
                 peer2.write(&mut writer).unwrap();
@@ -327,8 +385,8 @@ mod tests {
 
     #[test]
     fn establish_connection() {
-        let mut daps_driver_1 = TestDaps { is_valid: false };
-        let mut daps_driver_2 = TestDaps { is_valid: false };
+        let mut daps_driver_1 = TestDaps::default();
+        let mut daps_driver_2 = TestDaps::default();
         let (peer1, peer2, channel1_2, _channel2_1) =
             spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
 
@@ -338,24 +396,27 @@ mod tests {
 
     #[test]
     fn transmit_data() {
-        let mut daps_driver_1 = TestDaps { is_valid: false };
-        let mut daps_driver_2 = TestDaps { is_valid: false };
-        let (mut peer1, mut peer2, mut channel1_2, _channel2_1) =
+        let mut daps_driver_1 = TestDaps::default();
+        let mut daps_driver_2 = TestDaps::default();
+
+        // spawn and connect peers
+        let (mut peer1, mut peer2, mut channel1_2, mut channel2_1) =
             spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
 
         const MSG: &[u8; 11] = b"hello world";
 
+        // send message from peer1 to peer2
         let n = peer1.send(Bytes::from(MSG.as_slice())).unwrap();
         assert!(n == 11 && peer1.wants_write());
+        let mut n = 0;
         while peer1.wants_write() {
             let mut writer = channel1_2.writer();
-            peer1.write(&mut writer).unwrap();
+            n += peer1.write(&mut writer).unwrap();
             channel1_2 = writer.into_inner();
         }
+        assert!(n > 0 && n == channel1_2.len());
 
-        let data = Bytes::from(b"hello world".as_slice());
-        let n = peer1.send(data).unwrap();
-        assert!(n == 11 && peer1.wants_write());
+        // peer2 reads from channel
         let mut chunk_start = 0;
         while chunk_start < channel1_2.len() {
             match peer2.read(channel1_2.split_to(channel1_2.len())) {
@@ -368,7 +429,30 @@ mod tests {
             }
         }
 
+        // receive msg and compare from peer2
         let recv_msg = peer2.recv().unwrap();
         assert_eq!(MSG, recv_msg.deref());
+
+        // peer2 must reply with an ack
+        let mut n = 0;
+        while peer2.wants_write() {
+            let mut writer = channel2_1.writer();
+            n += peer2.write(&mut writer).unwrap();
+            channel2_1 = writer.into_inner();
+        }
+        assert!(n > 0 && n == channel2_1.len());
+
+        // peer2 reads from channel
+        let mut chunk_start = 0;
+        while chunk_start < channel2_1.len() {
+            match peer1.read(channel2_1.split_to(channel2_1.len())) {
+                Ok(n) => chunk_start += n,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        break;
+                    }
+                }
+            }
+        }
     }
 }

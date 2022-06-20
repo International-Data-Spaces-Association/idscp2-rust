@@ -4,3 +4,6 @@ members = [
     "idscp2_core",
     "idscp2_tests",
 ]
+
+[profile.bench]
+debug = true

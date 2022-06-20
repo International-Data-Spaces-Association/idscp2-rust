@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use std::marker::PhantomData;
 use std::time::Duration;
-use tinyvec::{array_vec, ArrayVec};
 use thiserror::Error;
+use tinyvec::{array_vec, ArrayVec};
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
@@ -72,9 +72,11 @@ pub enum FsmError {
     #[error("No transition available for the given event")]
     UnknownTransition,
     #[error(
-    "Action failed because FSM was started but is currently not connected. Try it later again"
+        "Action failed because FSM was started but is currently not connected. Try it later again"
     )]
     NotConnected,
+    #[error("Action failed because FSM is waiting for a message from remote. Try again after remote peer replied")]
+    AwaitingReply, // TODO name?
 }
 
 /*pub(crate) enum FsmIdscpMessageType {
@@ -109,14 +111,14 @@ pub(crate) enum UserEvent {
 }
 
 trait RaType {}
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct RaProverType {}
 impl RaType for RaProverType {}
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct RaVerifierType {}
 impl RaType for RaVerifierType {}
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum RaState<RaType> {
     Inactive(PhantomData<RaType>),
     Working,
@@ -124,7 +126,7 @@ enum RaState<RaType> {
     Terminated,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum TimeoutState {
     Active,
     Inactive,
@@ -253,7 +255,6 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 TimeoutState::Inactive, // Resend timeout
                 FsmEvent::FromUpper(UserEvent::StartHandshake),
             ) => {
-                println!("Hello");
                 let hello_msg = idscp_message_factory::create_idscp_hello(
                     self.daps_driver.get_token().into_bytes(),
                     &self.config.ra_config.expected_attestation_suite,
@@ -415,18 +416,19 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             // Otherwhise prover_state is never set to "done"
             (
                 ProtocolState::Running,
-                RaState::Working,                           // Prover state
-                _,                                          // Verifier state
-                _,                                          // DAT is valid?
-                _,                                          // Dat timeout
-                _,                                          // Ra timeout
-                _,                                          // Resend timeout
-                FsmEvent::FromRaProver(RaMessage::Ok(msg)), // TODO: adapt specification to make clear that Verifier signals success?
+                RaState::Working,                            // Prover state
+                _,                                           // Verifier state
+                _,                                           // DAT is valid?
+                _,                                           // Dat timeout
+                _,                                           // Ra timeout
+                _,                                           // Resend timeout
+                FsmEvent::FromRaProver(RaMessage::Ok(_msg)), // TODO what is msg
             ) => {
                 self.prover = RaState::Done;
-                let msg = idscp_message_factory::create_idscp_ra_prover(msg);
-                let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
+                // let msg = idscp_message_factory::create_idscp_ra_prover(msg);
+                // let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
+                // Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
+                Ok(ArrayVec::default())
             }
 
             // TLA Action DatExpired
@@ -442,6 +444,11 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 self.verifier = RaState::Inactive(PhantomData {});
                 self.daps_driver.invalidate();
+                println!(
+                    "sent dat expired, daps valid: {:?}, ready: {:?}",
+                    self.daps_driver.is_valid(),
+                    self.is_ready()
+                );
                 self.ra_timeout = TimeoutState::Inactive;
                 self.dat_timeout = TimeoutState::Inactive;
                 let actions = array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] =>
@@ -467,6 +474,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     IdscpMessage_oneof_message::idscpDatExpired(_),
                 )),
             ) => {
+                println!("got dat expired");
                 self.prover = RaState::Working;
                 let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(
                     idscp_message_factory::create_idscp_dat(
@@ -508,19 +516,20 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                         self.cleanup();
                     }
                 }
+                println!("received new dat from remote, ready: {:?}", self.is_ready());
                 Ok(actions)
             }
 
             // TLA Action SendData
             (
                 ProtocolState::Running,
-                RaState::Done,                              // Prover state
-                RaState::Done,                              // Verifier state
-                true,                                       // DAT is valid?
-                TimeoutState::Active,                       // Dat timeout
-                TimeoutState::Active,                       // Ra timeout
-                TimeoutState::Inactive,                     // Resend timeout
-                FsmEvent::FromUpper(UserEvent::Data(data)), // TODO: adapt specification to make clear that Verifier signals success?
+                RaState::Done,          // Prover state
+                RaState::Done,          // Verifier state
+                true,                   // DAT is valid?
+                TimeoutState::Active,   // Dat timeout
+                TimeoutState::Active,   // Ra timeout
+                TimeoutState::Inactive, // Resend timeout
+                FsmEvent::FromUpper(UserEvent::Data(data)),
             ) => {
                 if self.last_ack_received == self.last_data_sent.0.get_ack_bit() {
                     let msg = idscp_message_factory::create_idscp_data(
@@ -537,6 +546,18 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     self.no_matching_event()
                 }
             }
+
+            // TLA Action SendData Error
+            (
+                ProtocolState::Running,
+                RaState::Done,        // Prover state
+                RaState::Done,        // Verifier state
+                true,                 // DAT is valid?
+                TimeoutState::Active, // Dat timeout
+                TimeoutState::Active, // Ra timeout
+                TimeoutState::Active, // Resend timeout
+                FsmEvent::FromUpper(UserEvent::Data(_data)),
+            ) => Err(FsmError::AwaitingReply),
 
             // TLA Action ResendData
             (
@@ -730,8 +751,25 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
         unimplemented!()
     }
 
+    /// Returns `true` if a connection to another peer is set up and not closed.
+    /// Does not check if the connection has been validated.
     pub(crate) fn is_connected(&self) -> bool {
         self.state == ProtocolState::Running
+    }
+
+    /// Returns `true` if the connection is verified and can be used to exchange data.
+    pub(crate) fn is_verified(&self) -> bool {
+        self.is_connected()
+            && self.dat_timeout == TimeoutState::Active
+            && self.prover == RaState::Done
+            && self.verifier == RaState::Done
+            && self.daps_driver.is_valid()
+    }
+
+    /// Returns `true` if data can be sent in the current state.
+    /// This is the case, if the connection is verified and all sent data has been acknowledged by the connected peer.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.is_verified() && self.resend_timeout == TimeoutState::Inactive
     }
 
     // Implements the TLA spec's action "Close"

@@ -9,7 +9,26 @@ use std::{marker::PhantomData, time::Duration, vec};
 use super::fsm::*;
 
 pub(crate) struct TestDaps {
-    pub(crate) is_valid: bool,
+    is_valid: bool,
+    timeout: Duration,
+}
+
+impl Default for TestDaps {
+    fn default() -> Self {
+        Self {
+            is_valid: false,
+            timeout: Duration::from_secs(1),
+        }
+    }
+}
+
+impl TestDaps {
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            is_valid: false,
+            timeout,
+        }
+    }
 }
 
 impl DapsDriver for TestDaps {
@@ -25,7 +44,7 @@ impl DapsDriver for TestDaps {
         let token = String::from_utf8_lossy(token_bytes);
         if token.eq("valid") {
             self.is_valid = true;
-            Some(Duration::from_secs(1))
+            Some(self.timeout)
         } else {
             None
         }
@@ -38,7 +57,7 @@ impl DapsDriver for TestDaps {
 
 #[test]
 fn normal_sequence() {
-    let mut daps_driver = TestDaps { is_valid: false };
+    let mut daps_driver = TestDaps::default();
     let ra_config = AttestationConfig {
         supported_attestation_suite: vec!["TestRatProver".to_string()],
         expected_attestation_suite: vec!["TestRatProver".to_string()],
@@ -141,14 +160,15 @@ fn normal_sequence() {
             "attestation successful".as_bytes().to_owned(),
         )))
         .unwrap();
-    let msg = match &actions[0] {
-        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
-        _ => panic!("expected Secure Channel message"),
-    };
-    assert!(matches!(
-        msg.clone().message.unwrap(),
-        IdscpMessage_oneof_message::idscpRaProver(_)
-    ));
+    assert!(actions.len() == 0);
+    // let msg = match &actions[0] {
+    //     FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+    //     _ => panic!("expected Secure Channel message"),
+    // };
+    // assert!(matches!(
+    //     msg.clone().message.unwrap(),
+    //     IdscpMessage_oneof_message::idscpRaProver(_)
+    // ));
 
     // TLA Action SendData
     let actions = fsm
@@ -277,14 +297,15 @@ fn normal_sequence() {
             "attestation successful".as_bytes().to_owned(),
         )))
         .unwrap();
-    let msg = match &actions[0] {
-        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
-        _ => panic!("expected Secure Channel message"),
-    };
-    assert!(matches!(
-        msg.clone().message.unwrap(),
-        IdscpMessage_oneof_message::idscpRaProver(_)
-    ));
+    assert!(actions.len() == 0);
+    // let msg = match &actions[0] {
+    //     FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+    //     _ => panic!("expected Secure Channel message"),
+    // };
+    // assert!(matches!(
+    //     msg.clone().message.unwrap(),
+    //     IdscpMessage_oneof_message::idscpRaProver(_)
+    // ));
 
     // TLA Action RequestReattestation
     let actions = fsm
@@ -326,7 +347,7 @@ fn normal_sequence() {
 
 #[test]
 fn verifier_error_sequence() {
-    let mut daps_driver = TestDaps { is_valid: false };
+    let mut daps_driver = TestDaps::default();
     let ra_config = AttestationConfig {
         supported_attestation_suite: vec!["TestRatProver".to_string()],
         expected_attestation_suite: vec!["TestRatProver".to_string()],
