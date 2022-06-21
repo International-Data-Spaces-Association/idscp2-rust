@@ -1,6 +1,8 @@
 use super::IdscpConnection;
-use crate::{DapsDriver, IdscpConfig, MAX_FRAME_SIZE};
+use crate::{DapsDriver, IdscpConfig, IdscpConnectionError, MAX_FRAME_SIZE};
 use bytes::{Bytes, BytesMut};
+use std::io::ErrorKind;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -34,6 +36,27 @@ pub struct AsyncIdscpConnection<'fsm> {
     connection: IdscpConnection<'fsm>,
 }
 
+macro_rules! timed_out {
+    ($opt_timeout:expr, $future:expr) => {
+        if let Some(duration) = $opt_timeout {
+            tokio::time::timeout(
+                duration,
+                $future,
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    ErrorKind::Interrupted,
+                    "action timed out",
+                ))
+            })
+        } else {
+            $future.await
+        }
+
+    };
+}
+
 impl<'fsm> AsyncIdscpConnection<'fsm> {
     pub async fn connect(
         addr: &'static str,
@@ -61,7 +84,9 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                 Self::write(connection, &mut writer).await?;
             }
 
-            Self::read(connection, &mut reader).await?;
+            // ignore invalid frames here
+            // TODO differentiate between unknown frames and undefined traffic
+            let _ = Self::read(connection, &mut reader).await?;
 
             while connection.wants_write() {
                 Self::write(connection, &mut writer).await?;
@@ -73,11 +98,12 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
     async fn read<'a, R: AsyncReadExt + Unpin>(
         connection: &mut IdscpConnection<'a>,
         reader: &mut R,
-    ) -> std::io::Result<usize> {
+    ) -> std::io::Result<Result<usize, IdscpConnectionError>> {
         // TODO no nontransparent allocation during read function, maybe replace with arena?
         let mut buf: BytesMut = BytesMut::with_capacity(MAX_FRAME_SIZE);
         reader.read_buf(&mut buf).await?; // initial read "Copy"
-        connection.read(buf)
+                                          // TODO error type
+        Ok(connection.read(buf))
     }
 
     pub async fn write<'a, W: AsyncWriteExt + Unpin>(
@@ -103,15 +129,25 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         writer: &mut W,
     ) -> std::io::Result<()> {
         // TODO temporary implementation
-        while !connection.is_ready() {
+        while !connection.is_ready_to_send() {
             while connection.wants_write() {
                 Self::write(connection, writer).await?;
             }
-            Self::read(connection, reader).await?;
+            match Self::read(connection, reader).await? {
+                Ok(_) => {}
+                Err(IdscpConnectionError::MalformedInput) => {
+                    // TODO differentiate between unknown frame and undefined traffic
+                    return Err(std::io::Error::new(ErrorKind::InvalidData, "received invalid messages"));
+                }
+                Err(IdscpConnectionError::NotReady) => {
+                    // received message frame that should be discarded
+                }
+            }
         }
         Ok(())
     }
 
+    #[cfg(test)]
     async fn idle(&mut self) -> std::io::Result<()> {
         let (mut reader, mut writer) = self.tcp_stream.split();
         Self::recover(&mut self.connection, &mut reader, &mut writer).await
@@ -124,21 +160,28 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         writer: &mut W,
         data: Bytes,
     ) -> std::io::Result<usize> {
-        connection.check_timeouts();
-
-        // -> reestablish connected state
-        if !connection.is_ready() {
-            Self::recover(connection, reader, writer).await?;
+        loop {
+            match connection.send(data.clone()) {
+                Ok(n) => {
+                    Self::write(connection, writer).await?;
+                    break Ok(n);
+                }
+                Err(IdscpConnectionError::MalformedInput) => {
+                    break Err(std::io::Error::new(
+                        ErrorKind::OutOfMemory,
+                        "data too large",
+                    ));
+                }
+                Err(IdscpConnectionError::NotReady) => {
+                    Self::recover(connection, reader, writer).await?;
+                }
+            }
         }
-
-        let n = connection.send(data)?;
-        Self::write(connection, writer).await?;
-        Ok(n)
     }
 
-    pub async fn send(&mut self, data: Bytes) -> std::io::Result<usize> {
+    pub async fn send(&mut self, data: Bytes, timeout: Option<Duration>) -> std::io::Result<usize> {
         let (mut reader, mut writer) = self.tcp_stream.split();
-        Self::do_send_to(&mut self.connection, &mut reader, &mut writer, data).await
+        timed_out!(timeout, Self::do_send_to(&mut self.connection, &mut reader, &mut writer, data))
     }
 
     pub async fn send_to<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
@@ -146,8 +189,9 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         reader: &mut R,
         writer: &mut W,
         data: Bytes,
+        timeout: Option<Duration>,
     ) -> std::io::Result<usize> {
-        Self::do_send_to(&mut self.connection, reader, writer, data).await
+        timed_out!(timeout, Self::do_send_to(&mut self.connection, reader, writer, data))
     }
 
     #[inline]
@@ -156,16 +200,10 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         writer: &mut W,
         data: Bytes,
     ) -> std::io::Result<usize> {
-        // no correction after timeout
-        connection.check_timeouts();
-        if !connection.is_ready() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "awaiting reply",
-            ));
-        }
-
-        let n = connection.send(data)?;
+        // TODO error-type
+        let n = connection
+            .send(data)
+            .map_err(|_e| std::io::Error::new(ErrorKind::Other, ""))?;
         Self::write(connection, writer).await?;
         Ok(n)
     }
@@ -187,39 +225,42 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         reader: &mut R,
         writer: &mut W,
     ) -> std::io::Result<Option<Bytes>> {
-        connection.check_timeouts(); // TODO necessary here?
-        if !connection.is_ready() {
-            Self::recover(connection, reader, writer).await?;
-            // check if ack needs to be sent before maybe reading later
-            while connection.wants_write() {
-                Self::write(connection, writer).await?;
-            }
-        }
-
         match connection.recv() {
-            Some(msg) => Ok(Some(msg)),
+            Some(msg) => {
+                Ok(Some(msg))
+            }
             None => {
-                Self::read(connection, reader).await?;
-                // write potential acks
-                while connection.wants_write() {
-                    Self::write(connection, writer).await?;
+                loop {
+                    // check write first to prevent a deadlock
+                    while connection.wants_write() {
+                        Self::write(connection, writer).await?;
+                    }
+                    match Self::read(connection, reader).await? {
+                        Ok(_) => {
+                            break Ok(connection.recv());
+                        }
+                        Err(IdscpConnectionError::MalformedInput) => {
+                            break Err(std::io::Error::new(ErrorKind::InvalidData, "received invalid messages"));
+                        }
+                        Err(IdscpConnectionError::NotReady) => { }
+                    }
                 }
-                Ok(connection.recv())
             }
         }
     }
 
-    pub async fn recv(&mut self) -> std::io::Result<Option<Bytes>> {
+    pub async fn recv(&mut self, timeout: Option<Duration>) -> std::io::Result<Option<Bytes>> {
         let (mut reader, mut writer) = self.tcp_stream.split();
-        Self::do_recv_from(&mut self.connection, &mut reader, &mut writer).await
+        timed_out!(timeout, Self::do_recv_from(&mut self.connection, &mut reader, &mut writer))
     }
 
     pub async fn recv_from<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
+        timeout: Option<Duration>,
     ) -> std::io::Result<Option<Bytes>> {
-        Self::do_recv_from(&mut self.connection, reader, writer).await
+        timed_out!(timeout, Self::do_recv_from(&mut self.connection, reader, writer))
     }
 }
 
@@ -260,7 +301,7 @@ mod tests {
                         AsyncIdscpConnection::connect(address, &mut daps_driver, &TEST_CONFIG)
                             .await?;
                     let data = Bytes::from([1u8, 2, 3, 4].as_slice());
-                    let n = connection.send(data).await?;
+                    let n = connection.send(data, None).await?;
                     assert!(n == 4);
                     Ok::<(), std::io::Error>(())
                 },
@@ -293,7 +334,7 @@ mod tests {
                     let mut connection =
                         AsyncIdscpConnection::connect(address, &mut daps_driver, &TEST_CONFIG)
                             .await?;
-                    let n = connection.send(Bytes::from(MSG.as_slice())).await?;
+                    let n = connection.send(Bytes::from(MSG.as_slice()), None).await?;
                     assert!(n == 4);
                     Ok::<(), std::io::Error>(())
                 },
@@ -304,7 +345,7 @@ mod tests {
                         .await
                         .unwrap();
                     // sleep(Duration::from_secs(1));
-                    let msg = connection.recv().await.unwrap().unwrap();
+                    let msg = connection.recv(None).await.unwrap().unwrap();
                     assert_eq!(msg.deref(), MSG);
                     Ok::<(), std::io::Error>(())
                 }
@@ -359,7 +400,7 @@ mod tests {
         tokio::try_join!(
             async {
                 while !cmp_data.is_empty() {
-                    let msg = peer2.recv().await.unwrap();
+                    let msg = peer2.recv(None).await.unwrap();
                     if let Some(msg) = msg {
                         assert_eq!(msg.len(), chunk_size);
                         let cmp_msg = cmp_data.split_to(chunk_size);
@@ -371,7 +412,7 @@ mod tests {
             async {
                 while !data.is_empty() {
                     let msg = data.split_to(chunk_size);
-                    let n = peer1.send(msg.freeze()).await?;
+                    let n = peer1.send(msg.freeze(), None).await?;
                     if let Some(delay) = send_delay {
                         sleep(delay);
                     }

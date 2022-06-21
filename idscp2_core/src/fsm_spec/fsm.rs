@@ -3,7 +3,6 @@
 use bytes::Bytes;
 use std::marker::PhantomData;
 use std::time::Duration;
-use thiserror::Error;
 use tinyvec::{array_vec, ArrayVec};
 
 use crate::api::idscp2_config::IdscpConfig;
@@ -65,18 +64,6 @@ pub(crate) enum FsmEvent {
     // TIMEOUT EVENTS
     ResendTimout,
     DatExpired,
-}
-
-#[derive(Error, Debug)]
-pub enum FsmError {
-    #[error("No transition available for the given event")]
-    UnknownTransition,
-    #[error(
-        "Action failed because FSM was started but is currently not connected. Try it later again"
-    )]
-    NotConnected,
-    #[error("Action failed because FSM is waiting for a message from remote. Try again after remote peer replied")]
-    AwaitingReply, // TODO name?
 }
 
 /*pub(crate) enum FsmIdscpMessageType {
@@ -232,7 +219,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
     pub(crate) fn process_event(
         &mut self,
         event: FsmEvent,
-    ) -> Result<ArrayVec<[FsmAction; Fsm::EVENT_VEC_LEN]>, FsmError> {
+    ) -> ArrayVec<[FsmAction; Fsm::EVENT_VEC_LEN]> {
         let dat = self.daps_driver.is_valid();
         match (
             &self.state,
@@ -264,7 +251,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 self.state = ProtocolState::WaitForHello;
                 let action =
                     FsmAction::SecureChannelAction(SecureChannelAction::Message(hello_msg));
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action]
             }
 
             // TLA Action "ReceiveHallo"
@@ -285,6 +272,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 match self.daps_driver.verify_token(dat.get_token()) {
                     Some(dat_timeout) => {
                         self.state = ProtocolState::Running;
+                        // TODO adapt specification to signal which prover and verifier need to be chosen
                         self.prover = RaState::Working; // TODO: do it with real driver
                         self.verifier = RaState::Working;
                         actions.push(FsmAction::SetDatTimeout(dat_timeout));
@@ -302,7 +290,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                         self.cleanup();
                     }
                 }
-                Ok(actions)
+                actions
             }
 
             // TLA Action "SendProverMsg"
@@ -318,7 +306,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 let msg = idscp_message_factory::create_idscp_ra_prover(bytes);
                 let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action]
             }
 
             // TLA Action "SendVerifierMsg"
@@ -334,7 +322,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 let msg = idscp_message_factory::create_idscp_ra_verifier(bytes);
                 let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action]
             }
 
             // TLA Action "ReceiveVerifierMsg"
@@ -351,7 +339,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 )),
             ) => {
                 let action = FsmAction::ToProver(msg.data);
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action]
             }
 
             // TLA Action "ReceiveProverMsg"
@@ -368,7 +356,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 )),
             ) => {
                 let action = FsmAction::ToVerifier(msg.data);
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action]
             }
 
             // TLA Action "VerifierSuccess"
@@ -387,7 +375,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 let send_action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
                 let ra_timeout_action = FsmAction::SetRaTimeout(self.config.ra_config.ra_timeout);
                 self.ra_timeout = TimeoutState::Active; // TODO: make it one operation with SetRaTimeout
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => send_action, ra_timeout_action])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => send_action, ra_timeout_action]
             }
 
             // TLA Action "VerifierError"
@@ -408,7 +396,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     ),
                 ));
                 self.cleanup();
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => send_action])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => send_action]
             }
 
             // TLA Action "ProverSuccess"
@@ -428,7 +416,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 // let msg = idscp_message_factory::create_idscp_ra_prover(msg);
                 // let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
                 // Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
-                Ok(ArrayVec::default())
+                ArrayVec::default()
             }
 
             // TLA Action DatExpired
@@ -447,7 +435,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 println!(
                     "sent dat expired, daps valid: {:?}, ready: {:?}",
                     self.daps_driver.is_valid(),
-                    self.is_ready()
+                    self.is_ready_to_send()
                 );
                 self.ra_timeout = TimeoutState::Inactive;
                 self.dat_timeout = TimeoutState::Inactive;
@@ -458,7 +446,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                         idscp_message_factory::create_idscp_dat_exp(),
                     )),
                 ];
-                Ok(actions)
+                actions
             }
 
             // TLA Action ReceiveDatExpired
@@ -474,14 +462,13 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     IdscpMessage_oneof_message::idscpDatExpired(_),
                 )),
             ) => {
-                println!("got dat expired");
                 self.prover = RaState::Working;
                 let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(
                     idscp_message_factory::create_idscp_dat(
                         self.daps_driver.get_token().into_bytes(),
                     ),
                 ));
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action]
             }
 
             // TLA Action ReceiveDat
@@ -516,8 +503,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                         self.cleanup();
                     }
                 }
-                println!("received new dat from remote, ready: {:?}", self.is_ready());
-                Ok(actions)
+                actions
             }
 
             // TLA Action SendData
@@ -538,26 +524,14 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     );
                     self.last_data_sent.0.set(msg.get_idscpData().clone()); // zero-copy clone
                     self.resend_timeout = TimeoutState::Active;
-                    Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] =>
+                    array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] =>
                         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)),
                         FsmAction::SetResendDataTimeout(self.config.resend_timeout),
-                    ])
+                    ]
                 } else {
                     self.no_matching_event()
                 }
             }
-
-            // TLA Action SendData Error
-            (
-                ProtocolState::Running,
-                RaState::Done,        // Prover state
-                RaState::Done,        // Verifier state
-                true,                 // DAT is valid?
-                TimeoutState::Active, // Dat timeout
-                TimeoutState::Active, // Ra timeout
-                TimeoutState::Active, // Resend timeout
-                FsmEvent::FromUpper(UserEvent::Data(_data)),
-            ) => Err(FsmError::AwaitingReply),
 
             // TLA Action ResendData
             (
@@ -574,10 +548,10 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     if self.last_ack_received != self.last_data_sent.0.get_ack_bit() {
                         let mut msg = IdscpMessage::new();
                         msg.set_idscpData(resend_msg.clone()); // zero-copy clone
-                        Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] =>
+                        array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] =>
                             FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)),
                             FsmAction::SetResendDataTimeout(self.config.resend_timeout), // Resetting the timout
-                        ])
+                        ]
                     } else {
                         self.no_matching_event()
                     }
@@ -608,10 +582,10 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 let ack_msg = idscp_message_factory::create_idscp_ack(bool::from(
                     self.last_data_received.0.get_ack_bit(),
                 ));
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] =>
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] =>
                     FsmAction::NotifyUserData(idscp_data.data),
                     FsmAction::SecureChannelAction(SecureChannelAction::Message(ack_msg)),
-                ])
+                ]
             }
 
             // TLA Action ReceiveAck
@@ -634,7 +608,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     self.resend_timeout = TimeoutState::Inactive;
                 }
 
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => FsmAction::StopResendDataTimeout])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => FsmAction::StopResendDataTimeout]
             }
 
             // TLA Action CloseConnection
@@ -655,7 +629,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     ),
                 ));
                 self.cleanup();
-                Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => msg])
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => msg]
             }
 
             // TLA Action ReceiveClose
@@ -673,7 +647,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 self.cleanup();
                 // TODO: The other actors should probably be notified about that
-                Ok(ArrayVec::default())
+                ArrayVec::default()
             }
 
             // TLA Action RequestReattestation
@@ -695,7 +669,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                         idscp_message_factory::create_idscp_re_rat(cause),
                     )),
                 ];
-                Ok(actions)
+                actions
             }
 
             // TLA Action ReceiveReattestation
@@ -713,7 +687,22 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 self.prover = RaState::Working;
                 // TODO: the prover should probably be notified about that
-                Ok(ArrayVec::default())
+                ArrayVec::default()
+            }
+
+            // Unknown message
+            (
+                _,                                                           // FSM state
+                _,                                                           // Prover state
+                _,                                                           // Verifier state
+                _,                                                           // DAT is valid?
+                _,                                                           // Dat timeout
+                _,                                                           // Ra timeout
+                _,                                                           // Resend timeout
+                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(_)), // TODO only match on messages?
+            ) => {
+                // nothing to process
+                ArrayVec::default()
             }
 
             (state, prover, verifier, dat, dat_timeout, ra_timeout, resend_timeout, event) => {
@@ -747,7 +736,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
     /// Therefore we need to make this check within the body of the match arm.
     /// If this check does not succeed, we call this method to have a common place to ignore events that do not trigger
     /// an action in the current FSM state.
-    fn no_matching_event(&self) -> Result<ArrayVec<[FsmAction; Fsm::EVENT_VEC_LEN]>, FsmError> {
+    fn no_matching_event(&self) -> ArrayVec<[FsmAction; Fsm::EVENT_VEC_LEN]> {
         unimplemented!()
     }
 
@@ -768,7 +757,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
 
     /// Returns `true` if data can be sent in the current state.
     /// This is the case, if the connection is verified and all sent data has been acknowledged by the connected peer.
-    pub(crate) fn is_ready(&self) -> bool {
+    pub(crate) fn is_ready_to_send(&self) -> bool {
         self.is_verified() && self.resend_timeout == TimeoutState::Inactive
     }
 

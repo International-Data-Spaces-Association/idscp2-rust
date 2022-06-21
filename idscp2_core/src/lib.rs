@@ -1,7 +1,7 @@
 extern crate core;
 
 use std::convert::TryFrom;
-use std::io::{Error, ErrorKind, Write};
+use std::io::Write;
 use std::time::Instant;
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -9,10 +9,12 @@ use protobuf::{CodedOutputStream, Message};
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
+use crate::messages::idscpv2_messages::IdscpMessage_oneof_message;
 use crate::UserEvent::RequestReattestation;
 use chunkvec::ChunkVecBuffer;
 use fsm_spec::fsm::*;
 use messages::{idscp_message_factory as msg_factory, idscpv2_messages::IdscpMessage};
+use thiserror::Error;
 
 pub mod api;
 mod chunkvec;
@@ -30,6 +32,15 @@ const LENGTH_PREFIX_SIZE: usize = std::mem::size_of::<LengthPrefix>();
 ///
 /// This number impacts internal buffer sizes and restricts the maximum data message size.
 const MAX_FRAME_SIZE: usize = 4096;
+
+#[derive(Error, Debug)]
+pub enum IdscpConnectionError {
+    // TODO name
+    #[error("The input could not be processed")]
+    MalformedInput,
+    #[error("Action cannot be performed currently, since the connection is in an invalid state")]
+    NotReady,
+}
 
 pub struct IdscpConnection<'fsm> {
     /// state machine
@@ -53,9 +64,7 @@ impl<'fsm> IdscpConnection<'fsm> {
     /// Returns a new initialized `IdscpConnection` ready to communicate with another peer
     pub fn connect(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
         let mut fsm = Fsm::new(daps_driver, config);
-        let actions = fsm
-            .process_event(FsmEvent::FromUpper(UserEvent::StartHandshake))
-            .unwrap();
+        let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::StartHandshake));
         let mut conn = Self {
             fsm,
             send_queue: vec![],
@@ -71,21 +80,6 @@ impl<'fsm> IdscpConnection<'fsm> {
         conn
     }
 
-    // TODO possibly redundant
-    pub fn accept(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
-        let fsm = Fsm::new(daps_driver, config);
-        Self {
-            fsm,
-            send_queue: vec![],
-            read_queue: Default::default(),
-            recv_queue: Default::default(),
-            partial_read_len: None,
-            dat_timeout: None,
-            ra_timeout: None,
-            reset_data_timeout: None,
-        }
-    }
-
     pub fn is_connected(&self) -> bool {
         self.fsm.is_connected()
     }
@@ -94,41 +88,39 @@ impl<'fsm> IdscpConnection<'fsm> {
         self.fsm.is_verified()
     }
 
-    pub fn is_ready(&self) -> bool {
-        self.fsm.is_ready()
+    pub fn is_ready_to_send(&self) -> bool {
+        self.fsm.is_ready_to_send()
     }
 
     /// Checks internal timeouts and issues all actions required to return the internal state
     /// machine to a state where data can be transferred again.
-    pub fn check_timeouts(&mut self) {
-        let now = Instant::now();
-
-        // check timeouts
+    fn check_attestation_timeouts(&mut self, now: &Instant) {
         // Note: the order is important, since some timeouts may be cancelled out by other timeouts.
         // unwrap() is called since we expect the fsm to never fail expired timouts, though this may
         // be changed.
         if let Some(timeout) = &self.dat_timeout {
             if timeout < &now {
-                self.process_event(FsmEvent::DatExpired).unwrap();
+                self.process_event(FsmEvent::DatExpired);
             }
         }
         if let Some(timeout) = &self.ra_timeout {
             if timeout < &now {
-                self.process_event(FsmEvent::FromUpper(RequestReattestation("timeout")))
-                    .unwrap();
-            }
-        }
-        if let Some(timeout) = &self.reset_data_timeout {
-            if timeout < &now {
-                self.process_event(FsmEvent::ResendTimout).unwrap();
+                self.process_event(FsmEvent::FromUpper(RequestReattestation("timeout")));
             }
         }
     }
 
-    fn process_event(&mut self, event: FsmEvent) -> Result<(), FsmError> {
-        let actions = self.fsm.process_event(event)?;
+    fn check_resend_timeout(&mut self, now: &Instant) {
+        if let Some(timeout) = &self.reset_data_timeout {
+            if timeout < &now {
+                self.process_event(FsmEvent::ResendTimout);
+            }
+        }
+    }
+
+    fn process_event(&mut self, event: FsmEvent) {
+        let actions = self.fsm.process_event(event);
         self.do_actions(actions);
-        Ok(())
     }
 
     #[inline]
@@ -146,8 +138,7 @@ impl<'fsm> IdscpConnection<'fsm> {
                     self.dat_timeout = Some(Instant::now() + timeout);
 
                     // TODO temporary implementation
-                    self.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(vec![])))
-                        .unwrap();
+                    self.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(vec![])));
                 }
                 FsmAction::StopDatTimeout => {
                     self.dat_timeout = None;
@@ -166,8 +157,7 @@ impl<'fsm> IdscpConnection<'fsm> {
                 }
                 FsmAction::ToProver(_msg) => {
                     // TODO temporary implementation
-                    self.process_event(FsmEvent::FromRaProver(RaMessage::Ok(vec![])))
-                        .unwrap();
+                    self.process_event(FsmEvent::FromRaProver(RaMessage::Ok(vec![])));
                 }
 
                 a => {
@@ -178,15 +168,26 @@ impl<'fsm> IdscpConnection<'fsm> {
     }
 
     /// Consumes `buf` and attempts to parse at least one message frame from another peer.
-    /// Does not return an error if the message could only be partially parsed, but only if there
-    /// is a critical error. Does not check for internal timeouts.
-    pub fn read(&mut self, buf: BytesMut) -> std::io::Result<usize> {
+    /// Remaining bytes belonging to partial message frames are cached and parsed in a future call to `read`.
+    /// This function checks potential channel timeouts during processing.
+    ///
+    /// # Return
+    ///
+    /// The number of bytes parsed in total.
+    /// This may include bytes parsed from previous calls to `read`.
+    ///
+    /// # Errors
+    ///
+    /// If this function encounters an error during parsing, an [`IdscpConnectionError::MalformedInput`] error is returned.
+    /// If the state of the secure channel can no longer be trusted and messages received,
+    ///
+    pub fn read(&mut self, buf: BytesMut) -> Result<usize, IdscpConnectionError> {
         self.read_queue.append(buf);
         self.parse_read_queue(0)
     }
 
     /// Recursively parses and processes messages from the internal read buffer
-    fn parse_read_queue(&mut self, parsed_bytes: usize) -> std::io::Result<usize> {
+    fn parse_read_queue(&mut self, parsed_bytes: usize) -> Result<usize, IdscpConnectionError> {
         let msg_length: LengthPrefix = match self.partial_read_len.take() {
             Some(len) => len,
             None => {
@@ -222,20 +223,27 @@ impl<'fsm> IdscpConnection<'fsm> {
             let m = msg.compute_size();
             assert_eq!(m, msg_length);
             let msg_length = usize::try_from(m).unwrap();
-            let event =
-                FsmEvent::FromSecureChannel(SecureChannelEvent::Message(msg.message.unwrap()));
 
-            match self.process_event(event) {
-                Err(FsmError::UnknownTransition)  //ignore unexpected messages
-                | Ok(()) => self.parse_read_queue(LENGTH_PREFIX_SIZE + msg_length),
-                Err(FsmError::NotConnected) => Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block")),
-                Err(FsmError::AwaitingReply) => panic!("Unexpected FsmError::AwaitingReply from FSM while processing messages from remote"),
-            }
+            // match if data?
+            let msg = match msg.message.unwrap() {
+                IdscpMessage_oneof_message::idscpData(data_msg) => {
+                    // check timeouts and continue only when ready
+                    let now = Instant::now();
+                    self.check_attestation_timeouts(&now);
+                    if !self.is_verified() {
+                        return Err(IdscpConnectionError::NotReady);
+                    }
+                    IdscpMessage_oneof_message::idscpData(data_msg)
+                }
+                msg => msg,
+            };
+
+            let event = FsmEvent::FromSecureChannel(SecureChannelEvent::Message(msg));
+
+            self.process_event(event);
+            self.parse_read_queue(LENGTH_PREFIX_SIZE + msg_length)
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "could not decode idscp message",
-            ))
+            Err(IdscpConnectionError::MalformedInput)
         }
     }
 
@@ -268,8 +276,19 @@ impl<'fsm> IdscpConnection<'fsm> {
     }
 
     /// Sends `data` to the connected peer.
-    /// Does not check for internal timeouts.
-    pub fn send(&mut self, data: Bytes) -> std::io::Result<usize> {
+    /// This function checks potential channel timeouts during processing.
+    ///
+    /// # Return
+    ///
+    /// The number of bytes to be sent in total.
+    /// This includes message frame headers.
+    ///
+    /// # Errors
+    ///
+    /// If `data` is too large to be sent, an [`IdscpConnectionError::MalformedInput`] error is returned.
+    /// Returns [`IdscpConnectionError::NotReady`], if the state of the secure channel can no longer be trusted and messages not sent.
+    ///
+    pub fn send(&mut self, data: Bytes) -> Result<usize, IdscpConnectionError> {
         // the empty vector would not have worked, since the protobuf-encoded len of data also has
         // variable length that needs to be accounted for
         // no copy here, since data is ref-counted and dropped
@@ -279,30 +298,31 @@ impl<'fsm> IdscpConnection<'fsm> {
 
         // TODO maybe split data here to MAX_FRAME_SIZE
         if frame_size > buffer_space {
-            return Err(Error::from(ErrorKind::OutOfMemory));
+            return Err(IdscpConnectionError::MalformedInput);
         }
 
         let n = data.len();
 
-        self.process_event(FsmEvent::FromUpper(UserEvent::Data(data)))
-            .map_err(|e| match e {
-                FsmError::UnknownTransition => {
-                    std::io::Error::new(std::io::ErrorKind::Other, "unknown transition")
-                }
-                FsmError::NotConnected => {
-                    std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block")
-                }
-                FsmError::AwaitingReply => {
-                    // TODO replace with meaningful io::Error
-                    std::io::Error::new(std::io::ErrorKind::WouldBlock, "awaiting reply")
-                }
-            })?;
+        // check timeouts and continue only when ready
+        let now = Instant::now();
+        self.check_attestation_timeouts(&now);
+        self.check_resend_timeout(&now);
+        if !self.is_ready_to_send() {
+            return Err(IdscpConnectionError::NotReady);
+        }
+
+        self.process_event(FsmEvent::FromUpper(UserEvent::Data(data)));
         Ok(n)
     }
 
     /// Returns optional data received from the connected peer
     pub fn recv(&mut self) -> Option<Bytes> {
         self.recv_queue.pop()
+    }
+
+    pub fn close(&mut self) {
+        // TODO consume self?
+        todo!()
     }
 }
 
@@ -352,9 +372,7 @@ mod tests {
                 match peer2.read(channel1_2.split_to(channel1_2.len())) {
                     Ok(n) => chunk_start += n,
                     Err(e) => {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            break;
-                        }
+                        panic!("{:?}", e)
                     }
                 }
             }
@@ -371,9 +389,7 @@ mod tests {
                 match peer1.read(channel2_1.split_to(channel2_1.len())) {
                     Ok(n) => chunk_start += n,
                     Err(e) => {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            break;
-                        }
+                        panic!("{:?}", e)
                     }
                 }
             }
@@ -422,9 +438,7 @@ mod tests {
             match peer2.read(channel1_2.split_to(channel1_2.len())) {
                 Ok(n) => chunk_start += n,
                 Err(e) => {
-                    if e.kind() == std::io::ErrorKind::WouldBlock {
-                        break;
-                    }
+                    panic!("{:?}", e)
                 }
             }
         }
@@ -448,9 +462,7 @@ mod tests {
             match peer1.read(channel2_1.split_to(channel2_1.len())) {
                 Ok(n) => chunk_start += n,
                 Err(e) => {
-                    if e.kind() == std::io::ErrorKind::WouldBlock {
-                        break;
-                    }
+                    panic!("{:?}", e)
                 }
             }
         }
