@@ -292,7 +292,7 @@ impl<'fsm> IdscpConnection<'fsm> {
         // the empty vector would not have worked, since the protobuf-encoded len of data also has
         // variable length that needs to be accounted for
         // no copy here, since data is ref-counted and dropped
-        let msg: IdscpMessage = msg_factory::old_create_idscp_data(data.clone()); // create empty package to determine size overhead of protobuf encapsulation
+        let msg: IdscpMessage = msg_factory::create_idscp_data(data.clone(), true); // create empty package to determine size overhead of protobuf encapsulation
         let frame_size = usize::try_from(msg.compute_size()).unwrap();
         let buffer_space: usize = MAX_FRAME_SIZE;
 
