@@ -1,12 +1,12 @@
-#![allow(dead_code)]
-
 use bytes::Bytes;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Duration;
 use tinyvec::{array_vec, ArrayVec};
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
+use crate::driver::ra_driver::{RaDriver, RaRegistry};
 use crate::messages::idscp_message_factory;
 use crate::messages::idscpv2_messages::{
     IdscpClose_CloseCause, IdscpData, IdscpMessage, IdscpMessage_oneof_message,
@@ -20,7 +20,6 @@ enum ProtocolState {
     Terminated,
 }
 
-#[derive(Debug)]
 pub(crate) enum FsmAction {
     None, // TODO we use this to implement a meaningless Default for the safe ArrayVec
     SecureChannelAction(SecureChannelAction),
@@ -31,6 +30,8 @@ pub(crate) enum FsmAction {
     StopDatTimeout,
     StopRaTimeout,
     StopResendDataTimeout,
+    StartProver(Arc<dyn RaDriver + Send + Sync>),
+    StartVerifier(Arc<dyn RaDriver + Send + Sync>),
     ToProver(Bytes),
     ToVerifier(Bytes),
 }
@@ -176,8 +177,6 @@ impl ResendMetadata {
 struct LastDataSent(ResendMetadata);
 struct LastDataReceived(ResendMetadata);
 
-type ResendTimeout = u64; //TODO!
-
 pub(crate) struct Fsm<'daps, 'config> {
     /* all of the variables that make up the whole state space of the FSM */
     state: ProtocolState,
@@ -244,8 +243,8 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 let hello_msg = idscp_message_factory::create_idscp_hello(
                     self.daps_driver.get_token().into_bytes(),
-                    &self.config.ra_config.expected_attestation_suite,
-                    &self.config.ra_config.supported_attestation_suite,
+                    self.config.ra_config.supported_verifiers.get_ordered_ids(),
+                    self.config.ra_config.supported_provers.get_ordered_ids(),
                 );
 
                 self.state = ProtocolState::WaitForHello;
@@ -269,11 +268,36 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 let dat = hello_msg.get_dynamicAttributeToken();
                 let mut actions = ArrayVec::default();
+
                 match self.daps_driver.verify_token(dat.get_token()) {
                     Some(dat_timeout) => {
                         self.state = ProtocolState::Running;
                         // TODO adapt specification to signal which prover and verifier need to be chosen
-                        self.prover = RaState::Working; // TODO: do it with real driver
+                        match Self::find_ra_match(
+                            &self.config.ra_config.supported_provers,
+                            hello_msg.expectedRaSuite.as_slice(),
+                            self.config
+                                .ra_config
+                                .supported_provers
+                                .get_ordered_ids()
+                                .as_slice(),
+                        ) {
+                            Some(prover) => actions.push(FsmAction::StartProver(prover)),
+                            None => todo!("cleanup"),
+                        }
+                        match Self::find_ra_match(
+                            &self.config.ra_config.supported_verifiers,
+                            self.config
+                                .ra_config
+                                .supported_verifiers
+                                .get_ordered_ids()
+                                .as_slice(),
+                            hello_msg.supportedRaSuite.as_slice(),
+                        ) {
+                            Some(verifier) => actions.push(FsmAction::StartVerifier(verifier)),
+                            None => todo!("cleanup"),
+                        }
+                        self.prover = RaState::Working;
                         self.verifier = RaState::Working;
                         actions.push(FsmAction::SetDatTimeout(dat_timeout));
                         self.dat_timeout = TimeoutState::Active // TODO: make it one operation with SetDatTimeout
@@ -576,7 +600,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 if AckBit::from(idscp_data.get_alternating_bit())
                     != self.last_data_received.0.get_ack_bit()
                 {
-                    self.last_data_received.0.set(idscp_data.clone()); //TODO: maybe use (and clone) Boxes instead of cloning the data
+                    self.last_data_received.0.set(idscp_data.clone());
                 }
 
                 let ack_msg = idscp_message_factory::create_idscp_ack(bool::from(
@@ -759,6 +783,25 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
     /// This is the case, if the connection is verified and all sent data has been acknowledged by the connected peer.
     pub(crate) fn is_ready_to_send(&self) -> bool {
         self.is_verified() && self.resend_timeout == TimeoutState::Inactive
+    }
+
+    /// Finds the attestation id match between two capability lists
+    fn find_ra_match(
+        registry: &'config RaRegistry,
+        primary: &[String],
+        secondary: &[String],
+    ) -> Option<Arc<dyn RaDriver + Send + Sync>> {
+        // TODO formalize this
+        for p in primary {
+            for s in secondary {
+                if p == s {
+                    if let Some(driver) = registry.get_driver(p.as_str()) {
+                        return Some(driver.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     // Implements the TLA spec's action "Close"

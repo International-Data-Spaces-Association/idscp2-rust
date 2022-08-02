@@ -7,7 +7,7 @@ use std::time::Instant;
 use bytes::{Buf, Bytes, BytesMut};
 use protobuf::{CodedOutputStream, Message};
 
-use crate::api::idscp2_config::IdscpConfig;
+use crate::api::idscp2_config::{AttestationConfig, IdscpConfig};
 use crate::driver::daps_driver::DapsDriver;
 use crate::messages::idscpv2_messages::IdscpMessage_oneof_message;
 use crate::UserEvent::RequestReattestation;
@@ -43,6 +43,8 @@ pub enum IdscpConnectionError {
 }
 
 pub struct IdscpConnection<'fsm> {
+    /// attestation config for registries
+    ra_config: &'fsm AttestationConfig,
     /// state machine
     fsm: Fsm<'fsm, 'fsm>,
     /// internal buffer of messages to be sent to the connected peer
@@ -66,6 +68,7 @@ impl<'fsm> IdscpConnection<'fsm> {
         let mut fsm = Fsm::new(daps_driver, config);
         let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::StartHandshake));
         let mut conn = Self {
+            ra_config: config.ra_config,
             fsm,
             send_queue: vec![],
             read_queue: Default::default(),
@@ -155,13 +158,21 @@ impl<'fsm> IdscpConnection<'fsm> {
                 FsmAction::StopResendDataTimeout => {
                     self.reset_data_timeout = None;
                 }
+                FsmAction::StartProver(prover) => {
+                    // TODO launch prover someway else
+                    prover.execute()
+                }
+                FsmAction::StartVerifier(verifier) => {
+
+                    // TODO launch verifier
+                }
                 FsmAction::ToProver(_msg) => {
                     // TODO temporary implementation
                     self.process_event(FsmEvent::FromRaProver(RaMessage::Ok(vec![])));
                 }
 
                 a => {
-                    unimplemented!("Tasked to perform {:?}", a);
+                    // unimplemented!("Tasked to perform {:?}", a);
                 }
             }
         }
@@ -338,8 +349,8 @@ mod tests {
     use super::*;
 
     const TEST_RA_CONFIG: AttestationConfig = AttestationConfig {
-        supported_attestation_suite: vec![],
-        expected_attestation_suite: vec![],
+        supported_provers: vec![],
+        supported_verifiers: vec![],
         ra_timeout: Duration::from_secs(20),
     };
 

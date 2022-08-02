@@ -16,10 +16,15 @@ log = "0.4"
 protobuf = { version = "2.27.1", features = ["with-bytes"] }
 bytes = "1.1"
 futures = "0.3"
-tokio = {version = "1.17", features = ["full"]}
+tokio = {version = "1.17", features = ["full"] }
+openssl = "0.10.41"
+rust_tpm_verifier = { git = "ssh://git@gitlab.cc-asp.fraunhofer.de/idscp2.0/rust_tpm_verifier.git", version = "0.1.0", default-features = false, features = ["attest", "verify"],  optional = true }
 
 [build-dependencies]
 protoc-rust = "2.27.1"
+
+[features]
+ra_tpm = ["dep:rust_tpm_verifier"]
 
 [dev-dependencies]
 env_logger = "0.9.0"

@@ -39,21 +39,17 @@ pub struct AsyncIdscpConnection<'fsm> {
 macro_rules! timed_out {
     ($opt_timeout:expr, $future:expr) => {
         if let Some(duration) = $opt_timeout {
-            tokio::time::timeout(
-                duration,
-                $future,
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(std::io::Error::new(
-                    ErrorKind::Interrupted,
-                    "action timed out",
-                ))
-            })
+            tokio::time::timeout(duration, $future)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(std::io::Error::new(
+                        ErrorKind::Interrupted,
+                        "action timed out",
+                    ))
+                })
         } else {
             $future.await
         }
-
     };
 }
 
@@ -137,7 +133,10 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                 Ok(_) => {}
                 Err(IdscpConnectionError::MalformedInput) => {
                     // TODO differentiate between unknown frame and undefined traffic
-                    return Err(std::io::Error::new(ErrorKind::InvalidData, "received invalid messages"));
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "received invalid messages",
+                    ));
                 }
                 Err(IdscpConnectionError::NotReady) => {
                     // received message frame that should be discarded
@@ -181,7 +180,10 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
 
     pub async fn send(&mut self, data: Bytes, timeout: Option<Duration>) -> std::io::Result<usize> {
         let (mut reader, mut writer) = self.tcp_stream.split();
-        timed_out!(timeout, Self::do_send_to(&mut self.connection, &mut reader, &mut writer, data))
+        timed_out!(
+            timeout,
+            Self::do_send_to(&mut self.connection, &mut reader, &mut writer, data)
+        )
     }
 
     pub async fn send_to<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
@@ -191,7 +193,10 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         data: Bytes,
         timeout: Option<Duration>,
     ) -> std::io::Result<usize> {
-        timed_out!(timeout, Self::do_send_to(&mut self.connection, reader, writer, data))
+        timed_out!(
+            timeout,
+            Self::do_send_to(&mut self.connection, reader, writer, data)
+        )
     }
 
     #[inline]
@@ -226,9 +231,7 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         writer: &mut W,
     ) -> std::io::Result<Option<Bytes>> {
         match connection.recv() {
-            Some(msg) => {
-                Ok(Some(msg))
-            }
+            Some(msg) => Ok(Some(msg)),
             None => {
                 loop {
                     // check write first to prevent a deadlock
@@ -240,9 +243,12 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                             break Ok(connection.recv());
                         }
                         Err(IdscpConnectionError::MalformedInput) => {
-                            break Err(std::io::Error::new(ErrorKind::InvalidData, "received invalid messages"));
+                            break Err(std::io::Error::new(
+                                ErrorKind::InvalidData,
+                                "received invalid messages",
+                            ));
                         }
-                        Err(IdscpConnectionError::NotReady) => { }
+                        Err(IdscpConnectionError::NotReady) => {}
                     }
                 }
             }
@@ -251,7 +257,10 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
 
     pub async fn recv(&mut self, timeout: Option<Duration>) -> std::io::Result<Option<Bytes>> {
         let (mut reader, mut writer) = self.tcp_stream.split();
-        timed_out!(timeout, Self::do_recv_from(&mut self.connection, &mut reader, &mut writer))
+        timed_out!(
+            timeout,
+            Self::do_recv_from(&mut self.connection, &mut reader, &mut writer)
+        )
     }
 
     pub async fn recv_from<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
@@ -260,7 +269,10 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         writer: &mut W,
         timeout: Option<Duration>,
     ) -> std::io::Result<Option<Bytes>> {
-        timed_out!(timeout, Self::do_recv_from(&mut self.connection, reader, writer))
+        timed_out!(
+            timeout,
+            Self::do_recv_from(&mut self.connection, reader, writer)
+        )
     }
 }
 
@@ -279,8 +291,8 @@ mod tests {
     use tokio_test::{assert_err, assert_ok};
 
     const TEST_RA_CONFIG: AttestationConfig = AttestationConfig {
-        supported_attestation_suite: vec![],
-        expected_attestation_suite: vec![],
+        supported_provers: vec![],
+        supported_verifiers: vec![],
         ra_timeout: Duration::from_secs(20),
     };
 

@@ -59,8 +59,8 @@ impl DapsDriver for TestDaps {
 fn normal_sequence() {
     let mut daps_driver = TestDaps::default();
     let ra_config = AttestationConfig {
-        supported_attestation_suite: vec!["TestRatProver".to_string()],
-        expected_attestation_suite: vec!["TestRatProver".to_string()],
+        supported_provers: vec!["TestRatProver".to_string()],
+        supported_verifiers: vec!["TestRatProver".to_string()],
         ra_timeout: Duration::from_secs(30),
     };
     let config = IdscpConfig {
@@ -313,8 +313,8 @@ fn normal_sequence() {
 fn verifier_error_sequence() {
     let mut daps_driver = TestDaps::default();
     let ra_config = AttestationConfig {
-        supported_attestation_suite: vec!["TestRatProver".to_string()],
-        expected_attestation_suite: vec!["TestRatProver".to_string()],
+        supported_provers: vec!["TestRatProver".to_string()],
+        supported_verifiers: vec!["TestRatProver".to_string()],
         ra_timeout: Duration::from_secs(30),
     };
     let config = IdscpConfig {

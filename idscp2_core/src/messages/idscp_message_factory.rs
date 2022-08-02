@@ -7,8 +7,8 @@ use protobuf::SingularPtrField;
 
 pub(crate) fn create_idscp_hello(
     dat: Vec<u8>,
-    expected_rat_suite: &[String],
-    supported_rat_suite: &[String],
+    expected_rat_suite: Vec<String>,
+    supported_rat_suite: Vec<String>,
 ) -> IdscpMessage {
     let mut idscp_dat = IdscpDat::new();
     idscp_dat.token = Bytes::from(dat);
@@ -16,8 +16,8 @@ pub(crate) fn create_idscp_hello(
     let mut hello = IdscpHello::new();
     hello.version = 2;
     hello.dynamicAttributeToken = SingularPtrField::some(idscp_dat);
-    hello.expectedRaSuite = protobuf::RepeatedField::from_ref(expected_rat_suite);
-    hello.supportedRaSuite = protobuf::RepeatedField::from_ref(supported_rat_suite);
+    hello.expectedRaSuite = protobuf::RepeatedField::from(expected_rat_suite);
+    hello.supportedRaSuite = protobuf::RepeatedField::from(supported_rat_suite);
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpHello(hello);
