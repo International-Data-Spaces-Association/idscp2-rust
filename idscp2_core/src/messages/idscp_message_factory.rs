@@ -2,22 +2,26 @@ use super::idscpv2_messages::{
     IdscpAck, IdscpClose, IdscpClose_CloseCause, IdscpDat, IdscpDatExpired, IdscpData, IdscpHello,
     IdscpMessage, IdscpRaProver, IdscpRaVerifier, IdscpReRa,
 };
+use crate::driver::ra_driver::DriverId;
 use bytes::Bytes;
 use protobuf::SingularPtrField;
+use std::iter::FromIterator;
 
 pub(crate) fn create_idscp_hello(
-    dat: Vec<u8>,
-    expected_rat_suite: Vec<String>,
-    supported_rat_suite: Vec<String>,
+    dat: Bytes,
+    expected_rat_suite: &Vec<DriverId>,
+    supported_rat_suite: &Vec<DriverId>,
 ) -> IdscpMessage {
     let mut idscp_dat = IdscpDat::new();
-    idscp_dat.token = Bytes::from(dat);
+    idscp_dat.token = dat;
 
     let mut hello = IdscpHello::new();
     hello.version = 2;
     hello.dynamicAttributeToken = SingularPtrField::some(idscp_dat);
-    hello.expectedRaSuite = protobuf::RepeatedField::from(expected_rat_suite);
-    hello.supportedRaSuite = protobuf::RepeatedField::from(supported_rat_suite);
+    hello.expectedRaSuite =
+        protobuf::RepeatedField::from_iter(expected_rat_suite.iter().map(|&id| String::from(id)));
+    hello.supportedRaSuite =
+        protobuf::RepeatedField::from_iter(supported_rat_suite.iter().map(|&id| String::from(id)));
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpHello(hello);
@@ -34,18 +38,18 @@ pub(crate) fn create_idscp_close(code: IdscpClose_CloseCause, msg: &'static str)
     idscp
 }
 
-pub(crate) fn create_idscp_ra_prover(data: Vec<u8>) -> IdscpMessage {
+pub(crate) fn create_idscp_ra_prover(data: Bytes) -> IdscpMessage {
     let mut idscp_p = IdscpRaProver::new();
-    idscp_p.data = Bytes::from(data);
+    idscp_p.data = data;
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpRaProver(idscp_p);
     idscp
 }
 
-pub(crate) fn create_idscp_ra_verifier(data: Vec<u8>) -> IdscpMessage {
+pub(crate) fn create_idscp_ra_verifier(data: Bytes) -> IdscpMessage {
     let mut idscp_v = IdscpRaVerifier::new();
-    idscp_v.data = Bytes::from(data);
+    idscp_v.data = data;
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpRaVerifier(idscp_v);
@@ -58,9 +62,9 @@ pub(crate) fn create_idscp_dat_exp() -> IdscpMessage {
     idscp
 }
 
-pub(crate) fn create_idscp_dat(dat: Vec<u8>) -> IdscpMessage {
+pub(crate) fn create_idscp_dat(dat: Bytes) -> IdscpMessage {
     let mut idscp_dat = IdscpDat::new();
-    idscp_dat.token = Bytes::from(dat);
+    idscp_dat.token = dat;
 
     let mut idscp = IdscpMessage::new();
     idscp.set_idscpDat(idscp_dat);

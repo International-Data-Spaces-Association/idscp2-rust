@@ -1,3 +1,5 @@
+use crate::driver::ra_driver::tests::get_test_cert;
+use crate::msg_factory::create_idscp_hello;
 use crate::{
     api::idscp2_config::{AttestationConfig, IdscpConfig},
     driver::daps_driver::DapsDriver,
@@ -5,6 +7,7 @@ use crate::{
 };
 use bytes::Bytes;
 use std::{marker::PhantomData, time::Duration, vec};
+use crate::messages::idscpv2_messages::IdscpClose_CloseCause;
 
 use super::fsm::*;
 
@@ -59,9 +62,12 @@ impl DapsDriver for TestDaps {
 fn normal_sequence() {
     let mut daps_driver = TestDaps::default();
     let ra_config = AttestationConfig {
-        supported_provers: vec!["TestRatProver".to_string()],
-        supported_verifiers: vec!["TestRatProver".to_string()],
+        supported_provers: vec!["TestRatProver"],
+        expected_verifiers: vec!["TestRatProver"],
+        prover_registry: &Default::default(),
         ra_timeout: Duration::from_secs(30),
+        verifier_registry: &Default::default(),
+        peer_cert: get_test_cert(),
     };
     let config = IdscpConfig {
         ra_config: &ra_config,
@@ -71,7 +77,7 @@ fn normal_sequence() {
 
     // TLA Action Start
     let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::StartHandshake));
-    assert!(actions.len() == 1);
+    assert_eq!(actions.len(), 1);
     let hello_msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
         _ => panic!("expected Secure Channel message"),
@@ -82,15 +88,23 @@ fn normal_sequence() {
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         idscp_hello,
     )));
-    assert!(actions.len() == 1);
-    assert!(matches!(&actions[0], FsmAction::SetDatTimeout(_)));
+    assert_eq!(actions.len(), 3);
+    assert!(matches!(
+        &actions[0],
+        FsmAction::StartProver("TestRatProver")
+    ));
+    assert!(matches!(
+        &actions[1],
+        FsmAction::StartVerifier("TestRatProver")
+    ));
+    assert!(matches!(&actions[2], FsmAction::SetDatTimeout(_)));
 
     // TLA Action SendVerifierMsg
     let actions = fsm.process_event(FsmEvent::FromRaVerifier(RaMessage::RawData(
-        "nonce".as_bytes().to_owned(),
+        Bytes::from("nonce"),
         PhantomData,
     )));
-    assert!(actions.len() == 1);
+    assert_eq!(actions.len(), 1);
     let verif_msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(verif_msg)) => verif_msg,
         _ => panic!("expected Secure Channel message"),
@@ -102,15 +116,15 @@ fn normal_sequence() {
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         verif_msg,
     )));
-    assert!(actions.len() == 1);
+    assert_eq!(actions.len(), 1);
     assert!(matches!(&actions[0], FsmAction::ToProver(_)));
 
     // TLA Action SendProverMsg
     let actions = fsm.process_event(FsmEvent::FromRaProver(RaMessage::RawData(
-        "attestation_report".as_bytes().to_owned(),
+        Bytes::from("attestation_report"),
         PhantomData,
     )));
-    assert!(actions.len() == 1);
+    assert_eq!(actions.len(), 1);
     let prover_msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(prover_msg)) => prover_msg,
         _ => panic!("expected Secure Channel message"),
@@ -122,14 +136,14 @@ fn normal_sequence() {
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         prover_msg,
     )));
-    assert!(actions.len() == 1);
+    assert_eq!(actions.len(), 1);
     assert!(matches!(&actions[0], FsmAction::ToVerifier(_)));
 
     // TLA Action Verifier Success
-    let actions = fsm.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(
-        "attestation successful".as_bytes().to_owned(),
-    )));
-    assert!(actions.len() == 2);
+    let actions = fsm.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(Bytes::from(
+        "attestation successful",
+    ))));
+    assert_eq!(actions.len(), 2);
     let msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
         _ => panic!("expected Secure Channel message"),
@@ -141,10 +155,10 @@ fn normal_sequence() {
     assert!(matches!(&actions[1], FsmAction::SetRaTimeout(_)));
 
     // Action ProverSuccess (which is only implicitly defined in TLA Spec)
-    let actions = fsm.process_event(FsmEvent::FromRaProver(RaMessage::Ok(
-        "attestation successful".as_bytes().to_owned(),
-    )));
-    assert!(actions.len() == 0);
+    let actions = fsm.process_event(FsmEvent::FromRaProver(RaMessage::Ok(Bytes::from(
+        "attestation successful",
+    ))));
+    assert_eq!(actions.len(), 0);
     // let msg = match &actions[0] {
     //     FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
     //     _ => panic!("expected Secure Channel message"),
@@ -158,7 +172,7 @@ fn normal_sequence() {
     let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::Data(Bytes::from(
         "hello world!",
     ))));
-    assert!(actions.len() == 2);
+    assert_eq!(actions.len(), 2);
     let msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
         _ => panic!("expected Secure Channel message"),
@@ -176,7 +190,7 @@ fn normal_sequence() {
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         msg.message.unwrap(),
     )));
-    assert!(actions.len() == 2);
+    assert_eq!(actions.len(), 2);
     assert!(matches!(&actions[0], FsmAction::NotifyUserData(_)));
     let msg = match &actions[1] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
@@ -191,7 +205,7 @@ fn normal_sequence() {
 
     // TLA Action ResendData
     let actions = fsm.process_event(FsmEvent::ResendTimout);
-    assert!(actions.len() == 2);
+    assert_eq!(actions.len(), 2);
     let msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
         _ => panic!("expected Secure Channel message"),
@@ -213,7 +227,7 @@ fn normal_sequence() {
 
     // TLA Action DatExpired
     let actions = fsm.process_event(FsmEvent::DatExpired);
-    assert!(actions.len() == 3);
+    assert_eq!(actions.len(), 3);
     assert!(matches!(actions[0], FsmAction::StopRaTimeout));
     assert!(matches!(actions[1], FsmAction::StopDatTimeout));
     let dat_exp_msg = match &actions[2] {
@@ -230,7 +244,7 @@ fn normal_sequence() {
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         msg,
     )));
-    assert!(actions.len() == 1);
+    assert_eq!(actions.len(), 1);
     let dat_msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
         _ => panic!("expected Secure Channel message"),
@@ -245,14 +259,14 @@ fn normal_sequence() {
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         msg,
     )));
-    assert!(actions.len() == 1);
+    assert_eq!(actions.len(), 1);
     assert!(matches!(actions[0], FsmAction::SetDatTimeout(_)));
 
     // TLA Action Verifier Success
-    let actions = fsm.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(
-        "attestation successful".as_bytes().to_owned(),
-    )));
-    assert!(actions.len() == 2);
+    let actions = fsm.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(Bytes::from(
+        "attestation successful",
+    ))));
+    assert_eq!(actions.len(), 2);
     let msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
         _ => panic!("expected Secure Channel message"),
@@ -264,10 +278,10 @@ fn normal_sequence() {
     assert!(matches!(&actions[1], FsmAction::SetRaTimeout(_)));
 
     // Action ProverSuccess (which is only implicitly defined in TLA Spec)
-    let actions = fsm.process_event(FsmEvent::FromRaProver(RaMessage::Ok(
-        "attestation successful".as_bytes().to_owned(),
-    )));
-    assert!(actions.len() == 0);
+    let actions = fsm.process_event(FsmEvent::FromRaProver(RaMessage::Ok(Bytes::from(
+        "attestation successful",
+    ))));
+    assert_eq!(actions.len(), 0);
     // let msg = match &actions[0] {
     //     FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
     //     _ => panic!("expected Secure Channel message"),
@@ -279,7 +293,7 @@ fn normal_sequence() {
 
     // TLA Action RequestReattestation
     let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::RequestReattestation("")));
-    assert!(actions.len() == 2);
+    assert_eq!(actions.len(), 3);
     assert!(matches!(actions[0], FsmAction::StopRaTimeout));
     let re_ra_msg = match &actions[1] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
@@ -289,13 +303,15 @@ fn normal_sequence() {
         re_ra_msg.clone().message.unwrap(),
         IdscpMessage_oneof_message::idscpReRa(_)
     ));
+    assert!(matches!(actions[2], FsmAction::RestartVerifier));
 
     // TLA Action ReceiveReattestation
     let msg = re_ra_msg.clone().message.unwrap();
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         msg,
     )));
-    assert!(actions.is_empty());
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0], FsmAction::RestartProver));
 
     // TLA Action CloseConnection
     let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::CloseConnection));
@@ -310,12 +326,120 @@ fn normal_sequence() {
 }
 
 #[test]
+fn ra_driver_match_complex_sequence() {
+    let mut daps_driver = TestDaps::default();
+    let ra_config = AttestationConfig {
+        supported_provers: vec!["Unmatched1", "Unmatched2", "TestRatProver", "Unmatched3"],
+        expected_verifiers: vec!["TestRatProver", "Unmatched1", "Unmatched2"],
+        prover_registry: &Default::default(),
+        ra_timeout: Duration::from_secs(30),
+        verifier_registry: &Default::default(),
+        peer_cert: get_test_cert(),
+    };
+    let config = IdscpConfig {
+        ra_config: &ra_config,
+        resend_timeout: Duration::from_secs(5),
+    };
+    let mut fsm = Fsm::new(&mut daps_driver, &config);
+
+    let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::StartHandshake));
+    let hello_msg = match &actions[0] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+
+    // set the supported/expected fields
+    let expected_drivers = vec!["TestRatProver", "Unmatched1"];
+    let supported_drivers = vec!["Unmatched1", "TestRatProver"];
+    let dat = if let Some(IdscpMessage_oneof_message::idscpHello(hello)) = &hello_msg.message {
+        hello.dynamicAttributeToken.as_ref().unwrap().token.clone()
+    } else {
+        panic!("expected IdscpHello")
+    };
+
+    let idscp_hello = create_idscp_hello(dat, &expected_drivers, &supported_drivers);
+    let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+        idscp_hello.message.unwrap(),
+    )));
+
+    if let FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) = &actions[0] {
+        if let IdscpMessage_oneof_message::idscpClose(close_msg)= msg.message.as_ref().unwrap() {
+            panic!("{:?}", close_msg.cause_code);
+        }
+    }
+    assert_eq!(actions.len(), 3);
+    assert!(matches!(
+        actions[0],
+        FsmAction::StartProver("TestRatProver"),
+    ));
+    assert!(matches!(
+        actions[1],
+        FsmAction::StartVerifier("TestRatProver"),
+    ));
+}
+
+#[test]
+fn ra_driver_match_error_sequence() {
+    let mut daps_driver = TestDaps::default();
+    let ra_config = AttestationConfig {
+        supported_provers: vec!["Unmatched3", "TestRatProver", "Unmatched4", "Unmatched5"],
+        expected_verifiers: vec!["Unmatched3", "TestRatProver", "Unmatched4", "Unmatched5"],
+        prover_registry: &Default::default(),
+        ra_timeout: Duration::from_secs(30),
+        verifier_registry: &Default::default(),
+        peer_cert: get_test_cert(),
+    };
+    let config = IdscpConfig {
+        ra_config: &ra_config,
+        resend_timeout: Duration::from_secs(5),
+    };
+    let mut fsm = Fsm::new(&mut daps_driver, &config);
+
+    let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::StartHandshake));
+    let hello_msg = match &actions[0] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+
+    // set the supported/expected fields
+    let expected_drivers = vec!["TestRatProver", "Unmatched1"];
+    let supported_drivers = vec!["Unmatched1", "Unmatched2"];
+    let dat = if let Some(IdscpMessage_oneof_message::idscpHello(hello)) = &hello_msg.message {
+        hello.dynamicAttributeToken.as_ref().unwrap().token.clone()
+    } else {
+        panic!("expected IdscpHello")
+    };
+
+    let idscp_hello = create_idscp_hello(dat, &expected_drivers, &supported_drivers);
+    let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+        idscp_hello.message.unwrap(),
+    )));
+
+    assert_eq!(actions.len(), 1);
+    let msg = match &actions[0] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+    let cause_code = match msg.clone().message.unwrap() {
+        IdscpMessage_oneof_message::idscpClose(close_msg) => close_msg.cause_code,
+        _ => panic!("expected IdscpClose"),
+    };
+    assert_eq!(
+        cause_code,
+        IdscpClose_CloseCause::NO_RA_MECHANISM_MATCH_VERIFIER,
+    );
+}
+
+#[test]
 fn verifier_error_sequence() {
     let mut daps_driver = TestDaps::default();
     let ra_config = AttestationConfig {
-        supported_provers: vec!["TestRatProver".to_string()],
-        supported_verifiers: vec!["TestRatProver".to_string()],
+        supported_provers: vec!["TestRatProver"],
+        expected_verifiers: vec!["TestRatProver"],
+        prover_registry: &Default::default(),
         ra_timeout: Duration::from_secs(30),
+        verifier_registry: &Default::default(),
+        peer_cert: get_test_cert(),
     };
     let config = IdscpConfig {
         ra_config: &ra_config,
@@ -336,7 +460,7 @@ fn verifier_error_sequence() {
 
     // TLA Action VerifierError
     let actions = fsm.process_event(FsmEvent::FromRaVerifier(RaMessage::Failed()));
-    assert!(actions.len() == 1);
+    assert_eq!(actions.len(), 1);
     let msg = match &actions[0] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
         _ => panic!("expected Secure Channel message"),

@@ -1,12 +1,11 @@
 use bytes::Bytes;
 use std::marker::PhantomData;
-use std::sync::Arc;
 use std::time::Duration;
 use tinyvec::{array_vec, ArrayVec};
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
-use crate::driver::ra_driver::{RaDriver, RaRegistry};
+use crate::driver::ra_driver::DriverId;
 use crate::messages::idscp_message_factory;
 use crate::messages::idscpv2_messages::{
     IdscpClose_CloseCause, IdscpData, IdscpMessage, IdscpMessage_oneof_message,
@@ -30,8 +29,10 @@ pub(crate) enum FsmAction {
     StopDatTimeout,
     StopRaTimeout,
     StopResendDataTimeout,
-    StartProver(Arc<dyn RaDriver + Send + Sync>),
-    StartVerifier(Arc<dyn RaDriver + Send + Sync>),
+    StartProver(DriverId),
+    StartVerifier(DriverId),
+    RestartProver,
+    RestartVerifier,
     ToProver(Bytes),
     ToVerifier(Bytes),
 }
@@ -43,10 +44,10 @@ impl Default for FsmAction {
 }
 
 #[derive(Debug)]
-pub(crate) enum RaMessage<RaType> {
-    Ok(Vec<u8>), // TODO: make reference? // TODO: maybe make the inner type an Option<Vec<u8>> to not send packet with empty data,
+pub enum RaMessage<RaType> {
+    Ok(Bytes),
     Failed(),
-    RawData(Vec<u8>, PhantomData<RaType>),
+    RawData(Bytes, PhantomData<RaType>),
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -100,10 +101,10 @@ pub(crate) enum UserEvent {
 
 trait RaType {}
 #[derive(Debug, PartialEq)]
-pub(crate) struct RaProverType {}
+pub struct RaProverType {}
 impl RaType for RaProverType {}
 #[derive(Debug, PartialEq)]
-pub(crate) struct RaVerifierType {}
+pub struct RaVerifierType {}
 impl RaType for RaVerifierType {}
 
 #[derive(Debug, PartialEq)]
@@ -242,9 +243,9 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 FsmEvent::FromUpper(UserEvent::StartHandshake),
             ) => {
                 let hello_msg = idscp_message_factory::create_idscp_hello(
-                    self.daps_driver.get_token().into_bytes(),
-                    self.config.ra_config.supported_verifiers.get_ordered_ids(),
-                    self.config.ra_config.supported_provers.get_ordered_ids(),
+                    Bytes::from(self.daps_driver.get_token()),
+                    &self.config.ra_config.expected_verifiers,
+                    &self.config.ra_config.supported_provers,
                 );
 
                 self.state = ProtocolState::WaitForHello;
@@ -269,51 +270,61 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 let dat = hello_msg.get_dynamicAttributeToken();
                 let mut actions = ArrayVec::default();
 
-                match self.daps_driver.verify_token(dat.get_token()) {
-                    Some(dat_timeout) => {
-                        self.state = ProtocolState::Running;
-                        // TODO adapt specification to signal which prover and verifier need to be chosen
-                        match Self::find_ra_match(
-                            &self.config.ra_config.supported_provers,
-                            hello_msg.expectedRaSuite.as_slice(),
-                            self.config
-                                .ra_config
-                                .supported_provers
-                                .get_ordered_ids()
-                                .as_slice(),
-                        ) {
-                            Some(prover) => actions.push(FsmAction::StartProver(prover)),
-                            None => todo!("cleanup"),
-                        }
-                        match Self::find_ra_match(
-                            &self.config.ra_config.supported_verifiers,
-                            self.config
-                                .ra_config
-                                .supported_verifiers
-                                .get_ordered_ids()
-                                .as_slice(),
-                            hello_msg.supportedRaSuite.as_slice(),
-                        ) {
-                            Some(verifier) => actions.push(FsmAction::StartVerifier(verifier)),
-                            None => todo!("cleanup"),
-                        }
-                        self.prover = RaState::Working;
-                        self.verifier = RaState::Working;
-                        actions.push(FsmAction::SetDatTimeout(dat_timeout));
-                        self.dat_timeout = TimeoutState::Active // TODO: make it one operation with SetDatTimeout
-                    }
+                let dat_timeout = match self.daps_driver.verify_token(dat.get_token()) {
+                    Some(dat_timeout) => dat_timeout,
                     None => {
-                        actions.push(FsmAction::SecureChannelAction(
-                            SecureChannelAction::Message(
-                                idscp_message_factory::create_idscp_close(
-                                    IdscpClose_CloseCause::NO_VALID_DAT,
-                                    "",
-                                ),
+                        let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                            idscp_message_factory::create_idscp_close(
+                                IdscpClose_CloseCause::NO_VALID_DAT,
+                                "",
                             ),
                         ));
                         self.cleanup();
+                        return array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action];
+                    }
+                };
+
+                self.state = ProtocolState::Running;
+                actions.push(FsmAction::SetDatTimeout(dat_timeout));
+                self.dat_timeout = TimeoutState::Active; // TODO: make it one operation with SetDatTimeout
+
+                match Self::find_ra_match_from_secondary(
+                    hello_msg.expectedRaSuite.as_slice(),
+                    &self.config.ra_config.supported_provers,
+                ) {
+                    Some(prover) => actions.push(FsmAction::StartProver(prover)),
+                    None => {
+                        let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                            idscp_message_factory::create_idscp_close(
+                                IdscpClose_CloseCause::NO_RA_MECHANISM_MATCH_PROVER,
+                                "",
+                            ),
+                        ));
+                        self.cleanup();
+                        return array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action];
                     }
                 }
+
+                match Self::find_ra_match_from_primary(
+                    &self.config.ra_config.expected_verifiers,
+                    hello_msg.supportedRaSuite.as_slice(),
+                ) {
+                    Some(verifier) => actions.push(FsmAction::StartVerifier(verifier)),
+                    None => {
+                        let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                            idscp_message_factory::create_idscp_close(
+                                IdscpClose_CloseCause::NO_RA_MECHANISM_MATCH_VERIFIER,
+                                "",
+                            ),
+                        ));
+                        self.cleanup();
+                        return array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action];
+                    }
+                }
+
+                self.prover = RaState::Working;
+                self.verifier = RaState::Working;
+
                 actions
             }
 
@@ -486,13 +497,21 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     IdscpMessage_oneof_message::idscpDatExpired(_),
                 )),
             ) => {
+                let mut actions = ArrayVec::default();
+
                 self.prover = RaState::Working;
-                let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(
-                    idscp_message_factory::create_idscp_dat(
-                        self.daps_driver.get_token().into_bytes(),
-                    ),
-                ));
-                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action]
+                actions.push(FsmAction::RestartProver);
+                println!(
+                    "received dat expired, daps valid: {:?}, ready: {:?}",
+                    self.daps_driver.is_valid(),
+                    self.is_ready_to_send()
+                );
+                actions.push(FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                    idscp_message_factory::create_idscp_dat(Bytes::from(
+                        self.daps_driver.get_token(),
+                    )),
+                )));
+                actions
             }
 
             // TLA Action ReceiveDat
@@ -511,9 +530,10 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 let mut actions = ArrayVec::default();
                 match self.daps_driver.verify_token(dat.get_token()) {
                     Some(dat_timeout) => {
-                        self.verifier = RaState::Working;
                         self.dat_timeout = TimeoutState::Active;
                         actions.push(FsmAction::SetDatTimeout(dat_timeout));
+                        self.verifier = RaState::Working;
+                        actions.push(FsmAction::RestartVerifier);
                     }
                     None => {
                         actions.push(FsmAction::SecureChannelAction(
@@ -692,6 +712,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                     FsmAction::SecureChannelAction(SecureChannelAction::Message(
                         idscp_message_factory::create_idscp_re_rat(cause),
                     )),
+                    FsmAction::RestartVerifier,
                 ];
                 actions
             }
@@ -710,8 +731,10 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 )),
             ) => {
                 self.prover = RaState::Working;
-                // TODO: the prover should probably be notified about that
-                ArrayVec::default()
+                let actions = array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] =>
+                    FsmAction::RestartProver,
+                ];
+                actions
             }
 
             // Unknown message
@@ -785,19 +808,34 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
         self.is_verified() && self.resend_timeout == TimeoutState::Inactive
     }
 
+    // workaround
+
     /// Finds the attestation id match between two capability lists
-    fn find_ra_match(
-        registry: &'config RaRegistry,
-        primary: &[String],
-        secondary: &[String],
-    ) -> Option<Arc<dyn RaDriver + Send + Sync>> {
-        // TODO formalize this
+    fn find_ra_match_from_primary<T: AsRef<str>>(
+        primary: &[DriverId],
+        secondary: &[T],
+    ) -> Option<DriverId> {
         for p in primary {
             for s in secondary {
-                if p == s {
-                    if let Some(driver) = registry.get_driver(p.as_str()) {
-                        return Some(driver.clone());
-                    }
+                if *p == s.as_ref() {
+                    // no check against registry at this point anymore
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    /// Finds the attestation id match between two capability lists
+    fn find_ra_match_from_secondary<T: AsRef<str>>(
+        primary: &[T],
+        secondary: &[DriverId],
+    ) -> Option<DriverId> {
+        for p in primary {
+            for s in secondary {
+                if p.as_ref() == *s {
+                    // no check against registry at this point anymore
+                    return Some(s);
                 }
             }
         }

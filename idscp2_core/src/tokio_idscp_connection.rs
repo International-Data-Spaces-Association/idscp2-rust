@@ -75,18 +75,28 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         stream: &mut TcpStream,
     ) -> std::io::Result<()> {
         let (mut reader, mut writer) = stream.split();
-        while !connection.is_connected() {
+        let mut i = 0;
+        while !connection.is_ready_to_send() {
+            println!("loop {:?}", i);
+            // check for driver-messages
+            println!("check {:?}", i);
+            connection.check_drivers();
+
             while connection.wants_write() {
+                println!("write {:?}", i);
                 Self::write(connection, &mut writer).await?;
+            }
+            // early exit before read if driver communication ended and no further blocking read is required
+            if connection.is_ready_to_send() {
+                break;
             }
 
             // ignore invalid frames here
+            println!("read {:?}", i);
             // TODO differentiate between unknown frames and undefined traffic
             let _ = Self::read(connection, &mut reader).await?;
 
-            while connection.wants_write() {
-                Self::write(connection, &mut writer).await?;
-            }
+            i += 1;
         }
         Ok::<(), std::io::Error>(())
     }
@@ -124,14 +134,19 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         reader: &mut R,
         writer: &mut W,
     ) -> std::io::Result<()> {
+        println!("rec szat");
         // TODO temporary implementation
         while !connection.is_ready_to_send() {
+            println!("recover1");
             while connection.wants_write() {
                 Self::write(connection, writer).await?;
             }
+            println!("recover2");
             match Self::read(connection, reader).await? {
-                Ok(_) => {}
+                Ok(_) => {
+                    println!("recover read");}
                 Err(IdscpConnectionError::MalformedInput) => {
+                    println!("recover readerr");
                     // TODO differentiate between unknown frame and undefined traffic
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
@@ -139,10 +154,16 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                     ));
                 }
                 Err(IdscpConnectionError::NotReady) => {
+                    println!("recover not ready");
                     // received message frame that should be discarded
                 }
             }
+
+            // check for driver-messages
+            println!("recover3");
+            connection.check_drivers();
         }
+        println!("rec done, ready {}", connection.is_ready_to_send());
         Ok(())
     }
 
@@ -172,6 +193,7 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                     ));
                 }
                 Err(IdscpConnectionError::NotReady) => {
+                    println!("send: no ready, recovering");
                     Self::recover(connection, reader, writer).await?;
                 }
             }
@@ -234,21 +256,29 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
             Some(msg) => Ok(Some(msg)),
             None => {
                 loop {
+                    connection.check_drivers();
+                    println!("recv checked drivers, {}", connection.is_verified());
                     // check write first to prevent a deadlock
                     while connection.wants_write() {
+                        println!("recv: write");
                         Self::write(connection, writer).await?;
                     }
+                    println!("recv: reading...");
                     match Self::read(connection, reader).await? {
                         Ok(_) => {
+                            println!("recv read");
                             break Ok(connection.recv());
                         }
                         Err(IdscpConnectionError::MalformedInput) => {
+                            println!("recv read");
                             break Err(std::io::Error::new(
                                 ErrorKind::InvalidData,
                                 "received invalid messages",
                             ));
                         }
-                        Err(IdscpConnectionError::NotReady) => {}
+                        Err(IdscpConnectionError::NotReady) => {
+                            println!("recv: failed, recovering {}", connection.is_verified());
+                        }
                     }
                 }
             }
@@ -279,8 +309,8 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::idscp2_config::AttestationConfig;
     use crate::fsm_spec::fsm_tests::TestDaps;
+    use crate::tests::TEST_CONFIG;
     use crate::util::test::spawn_listener;
     use bytes::BytesMut;
     use futures::lock::MutexGuard;
@@ -289,17 +319,6 @@ mod tests {
     use std::thread::sleep;
     use std::time::Duration;
     use tokio_test::{assert_err, assert_ok};
-
-    const TEST_RA_CONFIG: AttestationConfig = AttestationConfig {
-        supported_provers: vec![],
-        supported_verifiers: vec![],
-        ra_timeout: Duration::from_secs(20),
-    };
-
-    const TEST_CONFIG: IdscpConfig = IdscpConfig {
-        resend_timeout: Duration::from_secs(20),
-        ra_config: &TEST_RA_CONFIG,
-    };
 
     #[test]
     fn async_establish_connection() {
@@ -412,7 +431,9 @@ mod tests {
         tokio::try_join!(
             async {
                 while !cmp_data.is_empty() {
+                    println!("-- peer2");
                     let msg = peer2.recv(None).await.unwrap();
+                    println!("-- peer2");
                     if let Some(msg) = msg {
                         assert_eq!(msg.len(), chunk_size);
                         let cmp_msg = cmp_data.split_to(chunk_size);
@@ -423,8 +444,10 @@ mod tests {
             },
             async {
                 while !data.is_empty() {
+                    println!("-- peer1");
                     let msg = data.split_to(chunk_size);
                     let n = peer1.send(msg.freeze(), None).await?;
+                    println!("-- peer1");
                     if let Some(delay) = send_delay {
                         sleep(delay);
                     }
@@ -467,6 +490,7 @@ mod tests {
     fn test_transfer_dat_expired() {
         const TRANSMISSION_SIZE: usize = 20_000;
         const FIXED_CHUNK_SIZE: usize = 1000;
+        println!("test started");
 
         let res = tokio_test::block_on(async {
             let mut daps_driver_1 = TestDaps::default();

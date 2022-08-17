@@ -1,47 +1,66 @@
-use openssl::x509::X509;
+use crate::api::idscp2_config::Certificate;
+use crate::RaMessage;
+use bytes::Bytes;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum RatIcm {
-    OK,
-    Failed,
+/// A `RaDriverInstance` represents the exclusive interface of an `IdscpConnection` to a driver. It
+/// is owned by a connection and only exists for the lifetime of the connection. Therefore, it
+/// should support multiple re-attestations.
+///
+/// The `RaDriverInstance` trait combines all necessary functionalities required to interact with
+/// the driver. It provides a synchronous common interface to which message bytes can be passed and
+/// from which message bytes can be returned. These message bytes originate/are sent to another
+/// compatible driver.
+pub trait RaDriverInstance<RaType> {
+    // TODO is this needed?
+    /// Returns the identifier of this driver
+    fn get_id(&self) -> DriverId;
+
+    /// Signal to the `RaDriverInstance` that the start of a (re-)attestation is requested.
+    /// Trigger-function that is called whenever the connection requires attestation.
+    fn begin_attestation(&mut self);
+
+    /// Synchronously triggers the processing of `msg`. Does not necessarily block until the message
+    /// has been processed.
+    fn send_msg(&mut self, msg: Bytes);
+
+    /// Synchronously returns any output message if available. This message may be some `RawData`
+    /// bytes destined for the driver at the other end of the connection or a `ControlMessage`
+    /// indicating to the connection that some process has been completed.
+    fn recv_msg(&mut self) -> Option<RaMessage<RaType>>;
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum RatMessage {
-    ControlMessage(RatIcm),
-    RawData(Vec<u8>),
+/// Executable drivers capable of being started synchronously once and to process (re-)attestation
+/// either as a Prover or Verifier. An `RaDriver` should hold all resources required for
+/// (re-)attestation that are shared between multiple connections.
+///
+/// Structs implementing this trait should provide their own interface for managing asynchronous
+/// Prover or Verifier executables. This should include scheduling and communication channels.
+///
+/// A RaDriver creates a launched instance with the `execute` function.
+pub trait RaDriver<RaType> {
+    /// Synchronously creates a new `RaDriverInstance` which holds all resources (such as
+    /// communication channels, nonces, or locks to shared resources) exclusive to one connection
+    /// and required to process multiple (re-)attestations.
+    fn new_instance(&self, cert: &Certificate) -> Box<dyn RaDriverInstance<RaType>>;
+
+    /// Returns the identifier of this driver
+    fn get_id(&self) -> DriverId;
 }
 
-pub trait RaDriver {
-    fn execute(&self, tx: Sender<RatMessage>, rx: Receiver<RatMessage>, cert: X509);
-    fn get_id(&self) -> &'static str;
-}
+pub type DriverId = &'static str;
 
-/*
-TODO: Are drivers considered equal in the attestation quality?
-
-If the order is relevant, it would be useful to adopt some kind of ordering mechanism to give
-certain drivers priority over others. On the other hand, some registered drivers may be disqualified
-for some connection and thus unavailable.
-
-The registry itself should provide this information to the `IdscpConnection` as a single source of
-truth and prevent the registry and supported-lists to become de-synced. This is important, since the
-registry is only referenced and could be dynamically changed, while the list has been dependent on
-the
- */
-
-/// The RaRegistry provides a set of available attestation drivers.
+/// The `RaRegistry` provides a set of available attestation drivers.
 /// Each supported driver needs to be registered in the registry
 #[derive(Clone)]
-pub struct RaRegistry {
-    drivers: HashMap<&'static str, Arc<dyn RaDriver + Send + Sync>>,
+pub struct RaRegistry<RaType> {
+    drivers: HashMap<DriverId, Arc<dyn RaDriver<RaType> + Send + Sync>>,
 }
 
-impl RaRegistry {
+impl<RaType> RaRegistry<RaType> {
     pub fn new() -> Self {
         RaRegistry {
             drivers: HashMap::new(),
@@ -52,106 +71,345 @@ impl RaRegistry {
     /// Does not replace any already registered driver with the same id.
     pub fn register_driver(
         &mut self,
-        driver: Arc<dyn RaDriver + Send + Sync>,
-    ) -> Result<&mut Arc<dyn RaDriver + Send + Sync>, Arc<dyn RaDriver + Send + Sync>> {
+        driver: Arc<dyn RaDriver<RaType> + Send + Sync>,
+    ) -> Result<&mut Arc<dyn RaDriver<RaType> + Send + Sync>, Arc<dyn RaDriver<RaType> + Send + Sync>>
+    {
         let id = driver.get_id();
         match self.drivers.entry(id) {
-            Entry::Occupied(entry) => Err(driver),
+            Entry::Occupied(ref _entry) => Err(driver),
             Entry::Vacant(entry) => Ok(entry.insert(driver)),
         }
     }
 
-    pub fn unregister_driver(&mut self, id: &'static str) {
+    pub fn unregister_driver(&mut self, id: &DriverId) {
         self.drivers.remove(id);
     }
 
-    pub fn get_driver(&self, id: &str) -> Option<&Arc<dyn RaDriver + Send + Sync>> {
+    pub fn get_driver(&self, id: &DriverId) -> Option<&Arc<dyn RaDriver<RaType> + Send + Sync>> {
         self.drivers.get(id)
     }
 
-    // TODO introduce order
-    pub fn get_all_driver_ids(&self) -> Vec<&&str> {
+    pub fn get_all_driver_ids(&self) -> Vec<&DriverId> {
         self.drivers.keys().collect()
-    }
-
-    pub(crate) fn get_ordered_ids(&self) -> Vec<String> {
-        self.drivers.keys().map(|&id| String::from(id)).collect()
     }
 }
 
-impl Default for RaRegistry {
+/// Provides the connection with an interface to synchronously launch and interact with a type of
+/// `RaDriver` (e.g., a Prover)
+pub(crate) struct RaManager<'reg, RaType> {
+    registry: &'reg RaRegistry<RaType>,
+    cert: &'reg Certificate, // ref?
+    // state
+    active_driver: Option<Arc<dyn RaDriver<RaType>>>,
+    active_instance: Option<Box<dyn RaDriverInstance<RaType>>>,
+    id: Option<DriverId>, // TODO redundant
+}
+
+///
+#[derive(Debug, Error)]
+pub(crate) enum RaManagerError {
+    #[error("The input could not be processed")]
+    DriverUnregistered,
+    #[error("The input could not be processed")]
+    DriverNotStarted,
+}
+
+impl<'reg, RaType> RaManager<'reg, RaType> {
+    pub fn new(registry: &'reg RaRegistry<RaType>, cert: &'reg Certificate) -> Self {
+        Self {
+            registry,
+            cert,
+            active_driver: None,
+            active_instance: None,
+            id: None,
+        }
+    }
+
+    /// Launches the driver with identifier `id` registered in the registry
+    pub fn select_driver(&mut self, id: DriverId) -> Result<(), RaManagerError> {
+        self.id = Some(id);
+        let driver = self
+            .registry
+            .get_driver(&id)
+            .ok_or_else(|| RaManagerError::DriverUnregistered)?
+            .clone();
+        self.active_driver = Some(driver);
+        Ok(())
+    }
+
+    pub fn run_driver(&mut self) -> Result<(), RaManagerError> {
+        if self.active_instance.is_none() {
+            let driver = self
+                .active_driver
+                .as_ref()
+                .ok_or_else(|| RaManagerError::DriverUnregistered)?;
+            let instance = driver.new_instance(&self.cert);
+
+            self.active_instance = Some(instance);
+        }
+        self.active_instance.as_mut().unwrap().begin_attestation();
+        Ok(())
+    }
+
+    pub fn recv_msg(&mut self) -> Option<RaMessage<RaType>> {
+        self.active_instance
+            .as_mut()
+            .and_then(|instance| instance.recv_msg())
+    }
+
+    pub fn send_msg(&mut self, msg: Bytes) {
+        if let Some(instance) = &mut self.active_instance {
+            instance.send_msg(msg)
+        }
+    }
+}
+
+impl<RaType> Default for RaRegistry<RaType> {
     fn default() -> Self {
         RaRegistry::new()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::driver::ra_driver::{RaDriver, RaRegistry, RatIcm, RatMessage};
-    use openssl::x509::X509;
+pub(crate) mod tests {
+    use crate::api::idscp2_config::Certificate;
+    use crate::driver::ra_driver::{DriverId, RaDriver, RaDriverInstance, RaMessage};
+    use crate::{RaProverType, RaVerifierType};
+    use bytes::Bytes;
+    use std::fs;
+    use std::marker::PhantomData;
     use std::path::PathBuf;
-    use std::sync::mpsc::{Receiver, Sender};
-    use std::sync::{mpsc, Arc};
-    use std::{fs, thread};
 
-    const TEST_DRIVER_ID: &'static str = "test.driver.id";
+    pub(crate) const TEST_PROVER_ID: DriverId = "test.prover";
+    pub(crate) const TEST_VERIFIER_ID: DriverId = "test.prover";
 
-    pub struct TestDriver {}
-    impl RaDriver for TestDriver {
-        fn execute(&self, tx: Sender<RatMessage>, _rx: Receiver<RatMessage>, _peer_cert: X509) {
-            if tx.send(RatMessage::ControlMessage(RatIcm::OK)).is_err() {
-                log::warn!("Prover was terminated from fsm");
-            }
+    pub(crate) struct TestVerifier {}
+
+    impl RaDriver<RaVerifierType> for TestVerifier {
+        fn new_instance(
+            &self,
+            _cert: &Certificate,
+        ) -> Box<(dyn RaDriverInstance<RaVerifierType> + 'static)> {
+            Box::new(TestVerifierInstance {
+                state: TestVerifierState::Idle,
+            })
         }
 
-        fn get_id(&self) -> &'static str {
-            TEST_DRIVER_ID
+        fn get_id(&self) -> DriverId {
+            TEST_PROVER_ID
         }
     }
 
-    fn get_test_cert() -> X509 {
+    pub(crate) struct TestVerifierInstance {
+        state: TestVerifierState,
+    }
+
+    pub(crate) enum TestVerifierState {
+        Idle,
+        Begin(Bytes),
+        WaitingForReply,
+        Response(Bytes, bool),
+        Ok,
+        Failed,
+    }
+
+    impl RaDriverInstance<RaVerifierType> for TestVerifierInstance {
+        fn get_id(&self) -> DriverId {
+            TEST_PROVER_ID
+        }
+
+        fn begin_attestation(&mut self) {
+            let msg = Bytes::from("test_begin_attest");
+            self.state = TestVerifierState::Begin(msg);
+        }
+
+        fn send_msg(&mut self, msg: Bytes) {
+            println!("send");
+            match &self.state {
+                TestVerifierState::WaitingForReply => {
+                    self.state = if msg == Bytes::from("test_report") {
+                        TestVerifierState::Response(Bytes::from("test_ok"), true)
+                    } else {
+                        TestVerifierState::Response(Bytes::from("test_failed"), false)
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        fn recv_msg(&mut self) -> Option<RaMessage<RaVerifierType>> {
+            println!("recv");
+            match &self.state {
+                TestVerifierState::Begin(msg) => {
+                    let msg = msg.clone();
+                    self.state = TestVerifierState::WaitingForReply;
+                    Some(RaMessage::RawData(msg, PhantomData))
+                }
+                TestVerifierState::Response(msg, is_ok) => {
+                    let msg = msg.clone();
+                    self.state = if *is_ok {
+                        TestVerifierState::Ok
+                    } else {
+                        TestVerifierState::Failed
+                    };
+                    Some(RaMessage::RawData(msg, PhantomData))
+                }
+                TestVerifierState::Ok => {
+                    self.state = TestVerifierState::Idle;
+                    Some(RaMessage::Ok(Bytes::from("test_ok")))
+                }
+                TestVerifierState::Failed => {
+                    self.state = TestVerifierState::Idle;
+                    Some(RaMessage::Failed())
+                }
+                _ => None,
+            }
+        }
+    }
+
+    pub(crate) struct TestProver {}
+
+    impl RaDriver<RaProverType> for TestProver {
+        fn new_instance(
+            &self,
+            _cert: &Certificate,
+        ) -> Box<(dyn RaDriverInstance<RaProverType> + 'static)> {
+            Box::new(TestProverInstance {
+                state: TestProverState::Idle,
+            })
+        }
+
+        fn get_id(&self) -> DriverId {
+            TEST_VERIFIER_ID
+        }
+    }
+
+    pub(crate) struct TestProverInstance {
+        state: TestProverState,
+    }
+
+    pub(crate) enum TestProverState {
+        Idle,
+        WaitingForBegin,
+        Reply(Bytes),
+        WaitingForResponse,
+        Ok,
+        Failed,
+    }
+
+    impl RaDriverInstance<RaProverType> for TestProverInstance {
+        fn get_id(&self) -> DriverId {
+            TEST_VERIFIER_ID
+        }
+
+        fn begin_attestation(&mut self) {
+            self.state = TestProverState::WaitingForBegin;
+        }
+
+        fn send_msg(&mut self, msg: Bytes) {
+            match &self.state {
+                TestProverState::WaitingForBegin => {
+                    self.state = TestProverState::Reply(Bytes::from(
+                        if msg == Bytes::from("test_begin_attest") {
+                            "test_report"
+                        } else {
+                            "test_failure"
+                        },
+                    ));
+                }
+                TestProverState::WaitingForResponse => {
+                    self.state = if msg == Bytes::from("test_ok") {
+                        TestProverState::Ok
+                    } else {
+                        TestProverState::Failed
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        fn recv_msg(&mut self) -> Option<RaMessage<RaProverType>> {
+            match &self.state {
+                TestProverState::Reply(msg) => {
+                    let msg = msg.clone();
+                    self.state = TestProverState::WaitingForResponse;
+                    Some(RaMessage::RawData(msg, PhantomData))
+                }
+                TestProverState::Ok => {
+                    self.state = TestProverState::Idle;
+                    Some(RaMessage::Ok(Bytes::from("test_ok")))
+                }
+                TestProverState::Failed => {
+                    self.state = TestProverState::Idle;
+                    Some(RaMessage::Failed())
+                }
+                _ => None,
+            }
+        }
+    }
+
+    pub(crate) fn get_test_cert() -> Certificate {
         let local_client_cert = fs::read(PathBuf::from(format!(
             "{}/../test_pki/resources/openssl/out/{}",
             env!("CARGO_MANIFEST_DIR"),
             "test_client.crt"
         )))
         .unwrap();
-        X509::from_pem(&local_client_cert).unwrap()
+        Certificate::from_pem(&local_client_cert).unwrap()
     }
 
     #[test]
-    fn test_rat_registries() {
-        let mut registry = RaRegistry::new();
+    fn ra_test_driver_communication() {
+        let verifier_driver = TestVerifier {};
+        let prover_driver  = TestProver {};
 
-        let driver = registry.get_driver(TEST_DRIVER_ID);
-        assert!(driver.is_none());
+        let cert = get_test_cert();
+        let mut verifier_instance = verifier_driver.new_instance(&cert);
+        let mut prover_instance = prover_driver.new_instance(&cert);
 
-        let test_driver = TestDriver {};
-        let test_cert = get_test_cert();
-        registry.register_driver(Arc::new(test_driver));
-        let driver = registry.get_driver("some.invalid.driver");
-        assert!(driver.is_none());
+        verifier_instance.begin_attestation();
+        prover_instance.begin_attestation();
 
-        let driver = registry.get_driver(TEST_DRIVER_ID);
-        assert!(driver.is_some());
+        let mut verifier_ok = false;
+        let mut prover_ok = false;
 
-        let driver_clone = Arc::clone(driver.unwrap());
-
-        registry.unregister_driver(TEST_DRIVER_ID);
-
-        let driver = registry.get_driver(TEST_DRIVER_ID);
-        assert!(driver.is_none());
-
-        //create channel
-        let (tx_, rx) = mpsc::channel();
-        let (tx, rx_) = mpsc::channel();
-
-        //spawn thread and execute verifier driver
-        thread::spawn(move || {
-            driver_clone.execute(tx, rx, test_cert);
-        });
-
-        drop(tx_);
-        drop(rx_);
+        while !prover_ok || !verifier_ok {
+            let mut loop_idle = true;
+            match verifier_instance.recv_msg() {
+                None => {}
+                Some(RaMessage::RawData(msg, ..)) => {
+                    loop_idle = false;
+                    println!("Passing msg V->P {:?}", msg);
+                    prover_instance.send_msg(msg);
+                }
+                Some(RaMessage::Ok(_)) => {
+                    loop_idle = false;
+                    println!("Verifier Ok");
+                    verifier_ok = true;
+                }
+                Some(RaMessage::Failed()) => {
+                    panic!("Test Verifier Failed");
+                }
+            }
+            match prover_instance.recv_msg() {
+                None => {}
+                Some(RaMessage::RawData(msg, ..)) => {
+                    loop_idle = false;
+                    println!("Passing msg P->V {:?}", msg);
+                    verifier_instance.send_msg(msg);
+                }
+                Some(RaMessage::Ok(_)) => {
+                    loop_idle = false;
+                    println!("Prover Ok");
+                    prover_ok = true;
+                }
+                Some(RaMessage::Failed()) => {
+                    panic!("Test Prover Failed");
+                }
+            }
+            if loop_idle {
+                panic!("Prover and Verifier deadlocked.");
+            }
+        }
     }
 }

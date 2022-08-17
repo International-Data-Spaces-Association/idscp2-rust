@@ -7,8 +7,9 @@ use std::time::Instant;
 use bytes::{Buf, Bytes, BytesMut};
 use protobuf::{CodedOutputStream, Message};
 
-use crate::api::idscp2_config::{AttestationConfig, IdscpConfig};
+use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
+use crate::driver::ra_driver::RaManager;
 use crate::messages::idscpv2_messages::IdscpMessage_oneof_message;
 use crate::UserEvent::RequestReattestation;
 use chunkvec::ChunkVecBuffer;
@@ -43,8 +44,10 @@ pub enum IdscpConnectionError {
 }
 
 pub struct IdscpConnection<'fsm> {
-    /// attestation config for registries
-    ra_config: &'fsm AttestationConfig,
+    /// attestation manager launching and communicating with provers
+    ra_prover_manager: RaManager<'fsm, RaProverType>,
+    /// attestation manager launching and communicating with provers
+    ra_verifier_manager: RaManager<'fsm, RaVerifierType>,
     /// state machine
     fsm: Fsm<'fsm, 'fsm>,
     /// internal buffer of messages to be sent to the connected peer
@@ -65,10 +68,19 @@ pub struct IdscpConnection<'fsm> {
 impl<'fsm> IdscpConnection<'fsm> {
     /// Returns a new initialized `IdscpConnection` ready to communicate with another peer
     pub fn connect(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
+        let ra_prover_manager = RaManager::new(
+            &config.ra_config.prover_registry,
+            &config.ra_config.peer_cert,
+        );
+        let ra_verifier_manager = RaManager::new(
+            &config.ra_config.verifier_registry,
+            &config.ra_config.peer_cert,
+        );
         let mut fsm = Fsm::new(daps_driver, config);
         let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::StartHandshake));
         let mut conn = Self {
-            ra_config: config.ra_config,
+            ra_prover_manager,
+            ra_verifier_manager,
             fsm,
             send_queue: vec![],
             read_queue: Default::default(),
@@ -130,18 +142,19 @@ impl<'fsm> IdscpConnection<'fsm> {
     fn do_actions<T: IntoIterator<Item = FsmAction>>(&mut self, action_vec: T) {
         for action in action_vec {
             match action {
+                // Outgoing messages
                 FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => {
                     // push outgoing message to send queue
+                    println!("message going out sec channel action");
                     self.send_queue.push(msg);
                 }
                 FsmAction::NotifyUserData(data) => {
                     self.recv_queue.append(data);
                 }
+
+                // Timeouts
                 FsmAction::SetDatTimeout(timeout) => {
                     self.dat_timeout = Some(Instant::now() + timeout);
-
-                    // TODO temporary implementation
-                    self.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(vec![])));
                 }
                 FsmAction::StopDatTimeout => {
                     self.dat_timeout = None;
@@ -158,23 +171,66 @@ impl<'fsm> IdscpConnection<'fsm> {
                 FsmAction::StopResendDataTimeout => {
                     self.reset_data_timeout = None;
                 }
+
+                // Prover/Verifier communication
+                // TODO error management
                 FsmAction::StartProver(prover) => {
-                    // TODO launch prover someway else
-                    prover.execute()
+                    self.ra_prover_manager.select_driver(prover);
+                    self.ra_prover_manager.run_driver();
                 }
                 FsmAction::StartVerifier(verifier) => {
-
-                    // TODO launch verifier
+                    self.ra_verifier_manager.select_driver(verifier);
+                    self.ra_verifier_manager.run_driver();
                 }
-                FsmAction::ToProver(_msg) => {
-                    // TODO temporary implementation
-                    self.process_event(FsmEvent::FromRaProver(RaMessage::Ok(vec![])));
+                FsmAction::RestartProver => {
+                    println!("restart prover");
+                    self.ra_prover_manager.run_driver().unwrap();
+                }
+                FsmAction::RestartVerifier => {
+                    println!("restart verifier");
+                    self.ra_verifier_manager.run_driver().unwrap();
+                }
+                FsmAction::ToProver(msg) => {
+                    self.ra_prover_manager.send_msg(msg);
+                }
+                FsmAction::ToVerifier(msg) => {
+                    self.ra_verifier_manager.send_msg(msg);
                 }
 
-                a => {
-                    // unimplemented!("Tasked to perform {:?}", a);
+                FsmAction::None => {
+                    #[cfg(debug_assertions)]
+                    unimplemented!("Tasked to perform FsmAction::None");
                 }
             }
+        }
+    }
+
+    pub fn check_drivers(&mut self) {
+        while let Some(msg) = self.ra_verifier_manager.recv_msg() {
+            match &msg {
+                RaMessage::Ok(_) => {
+                    println!("got msg from verifi ok");}
+                RaMessage::Failed() => {
+                    println!("got msg from verifi failed");
+                }
+                RaMessage::RawData(data, _) => {
+                    println!("got msg from verifi data {:?}", data);
+                }
+            }
+            self.process_event(FsmEvent::FromRaVerifier(msg));
+        }
+        while let Some(msg) = self.ra_prover_manager.recv_msg() {
+            match &msg {
+                RaMessage::Ok(_) => {
+                    println!("got msg from prover ok");}
+                RaMessage::Failed() => {
+                    println!("got msg from prover failed");
+                }
+                RaMessage::RawData(data, _) => {
+                    println!("got msg from prover data {:?}", data);
+                }
+            }
+            self.process_event(FsmEvent::FromRaProver(msg));
         }
     }
 
@@ -241,6 +297,8 @@ impl<'fsm> IdscpConnection<'fsm> {
                     // check timeouts and continue only when ready
                     let now = Instant::now();
                     self.check_attestation_timeouts(&now);
+                    // FIXME temporary fix: check if prover was successful from previous message
+                    self.check_drivers();
                     if !self.is_verified() {
                         return Err(IdscpConnectionError::NotReady);
                     }
@@ -316,6 +374,7 @@ impl<'fsm> IdscpConnection<'fsm> {
 
         // check timeouts and continue only when ready
         let now = Instant::now();
+        println!("sending> checking timeouts ({}, {})", self.is_ready_to_send(), self.is_verified());
         self.check_attestation_timeouts(&now);
         self.check_resend_timeout(&now);
         if !self.is_ready_to_send() {
@@ -323,6 +382,7 @@ impl<'fsm> IdscpConnection<'fsm> {
         }
 
         self.process_event(FsmEvent::FromUpper(UserEvent::Data(data)));
+        println!("sending> successful");
         Ok(n)
     }
 
@@ -340,24 +400,44 @@ impl<'fsm> IdscpConnection<'fsm> {
 #[cfg(test)]
 mod tests {
     use std::ops::Deref;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use crate::api::idscp2_config::AttestationConfig;
+    use crate::driver::ra_driver::tests::{
+        get_test_cert, TestProver, TestVerifier, TEST_PROVER_ID, TEST_VERIFIER_ID,
+    };
+    use crate::driver::ra_driver::RaRegistry;
     use bytes::{BufMut, BytesMut};
     use fsm_spec::fsm_tests::TestDaps;
+    use lazy_static::lazy_static;
 
     use super::*;
 
-    const TEST_RA_CONFIG: AttestationConfig = AttestationConfig {
-        supported_provers: vec![],
-        supported_verifiers: vec![],
-        ra_timeout: Duration::from_secs(20),
-    };
-
-    const TEST_CONFIG: IdscpConfig = IdscpConfig {
-        resend_timeout: Duration::from_secs(20),
-        ra_config: &TEST_RA_CONFIG,
-    };
+    lazy_static! {
+        pub(crate) static ref TEST_RA_PROVER_REGISTRY: RaRegistry<RaProverType> = {
+            let mut registry = RaRegistry::new();
+            let _ = registry.register_driver(Arc::new(TestProver {}));
+            registry
+        };
+        pub(crate) static ref TEST_RA_VERIFIER_REGISTRY: RaRegistry<RaVerifierType> = {
+            let mut registry = RaRegistry::new();
+            let _ = registry.register_driver(Arc::new(TestVerifier {}));
+            registry
+        };
+        pub(crate) static ref TEST_RA_CONFIG: AttestationConfig<'static> = AttestationConfig {
+            supported_provers: vec![TEST_PROVER_ID],
+            expected_verifiers: vec![TEST_VERIFIER_ID],
+            prover_registry: &TEST_RA_PROVER_REGISTRY,
+            ra_timeout: Duration::from_secs(20),
+            verifier_registry: &TEST_RA_VERIFIER_REGISTRY,
+            peer_cert: get_test_cert(),
+        };
+        pub(crate) static ref TEST_CONFIG: IdscpConfig<'static> = IdscpConfig {
+            resend_timeout: Duration::from_secs(20),
+            ra_config: &TEST_RA_CONFIG,
+        };
+    }
 
     fn spawn_peers<'a>(
         daps_driver_1: &'a mut dyn DapsDriver,
@@ -371,7 +451,9 @@ mod tests {
         let mut channel1_2 = BytesMut::with_capacity(MTU);
         let mut channel2_1 = BytesMut::with_capacity(MTU);
 
-        while peer1.wants_write() || peer2.wants_write() {
+        while !peer1.is_ready_to_send() || !peer2.is_ready_to_send() {
+            peer1.check_drivers();
+
             while peer1.wants_write() {
                 let mut writer = channel1_2.writer();
                 peer1.write(&mut writer).unwrap();
@@ -388,6 +470,7 @@ mod tests {
                 }
             }
             channel1_2.reserve(MTU);
+            peer2.check_drivers();
 
             while peer2.wants_write() {
                 let mut writer = channel2_1.writer();
@@ -417,8 +500,8 @@ mod tests {
         let (peer1, peer2, channel1_2, _channel2_1) =
             spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
 
-        assert!(peer1.is_connected() && channel1_2.is_empty());
-        assert!(peer2.is_connected() && channel1_2.is_empty());
+        assert!(peer1.is_ready_to_send() && channel1_2.is_empty());
+        assert!(peer2.is_ready_to_send() && channel1_2.is_empty());
     }
 
     #[test]
