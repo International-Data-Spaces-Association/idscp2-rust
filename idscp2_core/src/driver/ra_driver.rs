@@ -208,8 +208,7 @@ pub(crate) mod tests {
         Idle,
         Begin(Bytes),
         WaitingForReply,
-        Response(Bytes, bool),
-        Ok,
+        Ok(Bytes),
         Failed,
     }
 
@@ -224,39 +223,26 @@ pub(crate) mod tests {
         }
 
         fn send_msg(&mut self, msg: Bytes) {
-            println!("send");
-            match &self.state {
-                TestVerifierState::WaitingForReply => {
-                    self.state = if msg == Bytes::from("test_report") {
-                        TestVerifierState::Response(Bytes::from("test_ok"), true)
-                    } else {
-                        TestVerifierState::Response(Bytes::from("test_failed"), false)
-                    };
-                }
-                _ => {}
+            if let TestVerifierState::WaitingForReply = &self.state {
+                self.state = if msg == *"test_report" {
+                    TestVerifierState::Ok(Bytes::from("test_ok"))
+                } else {
+                    TestVerifierState::Failed
+                };
             }
         }
 
         fn recv_msg(&mut self) -> Option<RaMessage<RaVerifierType>> {
-            println!("recv");
             match &self.state {
                 TestVerifierState::Begin(msg) => {
                     let msg = msg.clone();
                     self.state = TestVerifierState::WaitingForReply;
                     Some(RaMessage::RawData(msg, PhantomData))
                 }
-                TestVerifierState::Response(msg, is_ok) => {
+                TestVerifierState::Ok(msg) => {
                     let msg = msg.clone();
-                    self.state = if *is_ok {
-                        TestVerifierState::Ok
-                    } else {
-                        TestVerifierState::Failed
-                    };
-                    Some(RaMessage::RawData(msg, PhantomData))
-                }
-                TestVerifierState::Ok => {
                     self.state = TestVerifierState::Idle;
-                    Some(RaMessage::Ok(Bytes::from("test_ok")))
+                    Some(RaMessage::Ok(msg))
                 }
                 TestVerifierState::Failed => {
                     self.state = TestVerifierState::Idle;
@@ -310,7 +296,7 @@ pub(crate) mod tests {
             match &self.state {
                 TestProverState::WaitingForBegin => {
                     self.state = TestProverState::Reply(Bytes::from(
-                        if msg == Bytes::from("test_begin_attest") {
+                        if msg == *"test_begin_attest" {
                             "test_report"
                         } else {
                             "test_failure"
@@ -318,7 +304,7 @@ pub(crate) mod tests {
                     ));
                 }
                 TestProverState::WaitingForResponse => {
-                    self.state = if msg == Bytes::from("test_ok") {
+                    self.state = if msg == *"test_ok" {
                         TestProverState::Ok
                     } else {
                         TestProverState::Failed
@@ -337,7 +323,7 @@ pub(crate) mod tests {
                 }
                 TestProverState::Ok => {
                     self.state = TestProverState::Idle;
-                    Some(RaMessage::Ok(Bytes::from("test_ok")))
+                    Some(RaMessage::Ok(Bytes::from("unused")))
                 }
                 TestProverState::Failed => {
                     self.state = TestProverState::Idle;
@@ -382,9 +368,10 @@ pub(crate) mod tests {
                     println!("Passing msg V->P {:?}", msg);
                     prover_instance.send_msg(msg);
                 }
-                Some(RaMessage::Ok(_)) => {
+                Some(RaMessage::Ok(msg)) => {
                     loop_idle = false;
-                    println!("Verifier Ok");
+                    println!("Verifier Ok. Passing msg V->P {:?}", msg);
+                    prover_instance.send_msg(msg);
                     verifier_ok = true;
                 }
                 Some(RaMessage::Failed()) => {

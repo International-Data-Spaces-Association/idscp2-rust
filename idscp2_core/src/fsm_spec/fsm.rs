@@ -467,11 +467,6 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             ) => {
                 self.verifier = RaState::Inactive(PhantomData {});
                 self.daps_driver.invalidate();
-                println!(
-                    "sent dat expired, daps valid: {:?}, ready: {:?}",
-                    self.daps_driver.is_valid(),
-                    self.is_ready_to_send()
-                );
                 self.ra_timeout = TimeoutState::Inactive;
                 self.dat_timeout = TimeoutState::Inactive;
                 let actions = array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] =>
@@ -501,11 +496,6 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
 
                 self.prover = RaState::Working;
                 actions.push(FsmAction::RestartProver);
-                println!(
-                    "received dat expired, daps valid: {:?}, ready: {:?}",
-                    self.daps_driver.is_valid(),
-                    self.is_ready_to_send()
-                );
                 actions.push(FsmAction::SecureChannelAction(SecureChannelAction::Message(
                     idscp_message_factory::create_idscp_dat(Bytes::from(
                         self.daps_driver.get_token(),

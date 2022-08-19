@@ -89,15 +89,15 @@ fn normal_sequence() {
         idscp_hello,
     )));
     assert_eq!(actions.len(), 3);
+    assert!(matches!(&actions[0], FsmAction::SetDatTimeout(_)));
     assert!(matches!(
-        &actions[0],
+        &actions[1],
         FsmAction::StartProver("TestRatProver")
     ));
     assert!(matches!(
-        &actions[1],
+        &actions[2],
         FsmAction::StartVerifier("TestRatProver")
     ));
-    assert!(matches!(&actions[2], FsmAction::SetDatTimeout(_)));
 
     // TLA Action SendVerifierMsg
     let actions = fsm.process_event(FsmEvent::FromRaVerifier(RaMessage::RawData(
@@ -244,8 +244,9 @@ fn normal_sequence() {
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         msg,
     )));
-    assert_eq!(actions.len(), 1);
-    let dat_msg = match &actions[0] {
+    assert_eq!(actions.len(), 2);
+    assert!(matches!(actions[0], FsmAction::RestartProver));
+    let dat_msg = match &actions[1] {
         FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
         _ => panic!("expected Secure Channel message"),
     };
@@ -259,8 +260,9 @@ fn normal_sequence() {
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         msg,
     )));
-    assert_eq!(actions.len(), 1);
+    assert_eq!(actions.len(), 2);
     assert!(matches!(actions[0], FsmAction::SetDatTimeout(_)));
+    assert!(matches!(actions[1], FsmAction::RestartVerifier));
 
     // TLA Action Verifier Success
     let actions = fsm.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(Bytes::from(
@@ -369,11 +371,11 @@ fn ra_driver_match_complex_sequence() {
     }
     assert_eq!(actions.len(), 3);
     assert!(matches!(
-        actions[0],
+        actions[1],
         FsmAction::StartProver("TestRatProver"),
     ));
     assert!(matches!(
-        actions[1],
+        actions[2],
         FsmAction::StartVerifier("TestRatProver"),
     ));
 }

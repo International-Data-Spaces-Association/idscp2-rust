@@ -75,15 +75,13 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         stream: &mut TcpStream,
     ) -> std::io::Result<()> {
         let (mut reader, mut writer) = stream.split();
-        let mut i = 0;
         while !connection.is_ready_to_send() {
-            println!("loop {:?}", i);
             // check for driver-messages
-            println!("check {:?}", i);
+            // FIXME async drivers force waiting on read
+
             connection.check_drivers();
 
             while connection.wants_write() {
-                println!("write {:?}", i);
                 Self::write(connection, &mut writer).await?;
             }
             // early exit before read if driver communication ended and no further blocking read is required
@@ -92,11 +90,8 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
             }
 
             // ignore invalid frames here
-            println!("read {:?}", i);
             // TODO differentiate between unknown frames and undefined traffic
             let _ = Self::read(connection, &mut reader).await?;
-
-            i += 1;
         }
         Ok::<(), std::io::Error>(())
     }
@@ -134,19 +129,14 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         reader: &mut R,
         writer: &mut W,
     ) -> std::io::Result<()> {
-        println!("rec szat");
         // TODO temporary implementation
         while !connection.is_ready_to_send() {
-            println!("recover1");
             while connection.wants_write() {
                 Self::write(connection, writer).await?;
             }
-            println!("recover2");
             match Self::read(connection, reader).await? {
-                Ok(_) => {
-                    println!("recover read");}
+                Ok(_) => {}
                 Err(IdscpConnectionError::MalformedInput) => {
-                    println!("recover readerr");
                     // TODO differentiate between unknown frame and undefined traffic
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
@@ -154,16 +144,13 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                     ));
                 }
                 Err(IdscpConnectionError::NotReady) => {
-                    println!("recover not ready");
                     // received message frame that should be discarded
                 }
             }
 
             // check for driver-messages
-            println!("recover3");
             connection.check_drivers();
         }
-        println!("rec done, ready {}", connection.is_ready_to_send());
         Ok(())
     }
 
@@ -193,7 +180,6 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                     ));
                 }
                 Err(IdscpConnectionError::NotReady) => {
-                    println!("send: no ready, recovering");
                     Self::recover(connection, reader, writer).await?;
                 }
             }
@@ -257,28 +243,21 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
             None => {
                 loop {
                     connection.check_drivers();
-                    println!("recv checked drivers, {}", connection.is_verified());
                     // check write first to prevent a deadlock
                     while connection.wants_write() {
-                        println!("recv: write");
                         Self::write(connection, writer).await?;
                     }
-                    println!("recv: reading...");
                     match Self::read(connection, reader).await? {
                         Ok(_) => {
-                            println!("recv read");
                             break Ok(connection.recv());
                         }
                         Err(IdscpConnectionError::MalformedInput) => {
-                            println!("recv read");
                             break Err(std::io::Error::new(
                                 ErrorKind::InvalidData,
                                 "received invalid messages",
                             ));
                         }
-                        Err(IdscpConnectionError::NotReady) => {
-                            println!("recv: failed, recovering {}", connection.is_verified());
-                        }
+                        Err(IdscpConnectionError::NotReady) => {}
                     }
                 }
             }
@@ -431,9 +410,7 @@ mod tests {
         tokio::try_join!(
             async {
                 while !cmp_data.is_empty() {
-                    println!("-- peer2");
                     let msg = peer2.recv(None).await.unwrap();
-                    println!("-- peer2");
                     if let Some(msg) = msg {
                         assert_eq!(msg.len(), chunk_size);
                         let cmp_msg = cmp_data.split_to(chunk_size);
@@ -444,10 +421,8 @@ mod tests {
             },
             async {
                 while !data.is_empty() {
-                    println!("-- peer1");
                     let msg = data.split_to(chunk_size);
                     let n = peer1.send(msg.freeze(), None).await?;
-                    println!("-- peer1");
                     if let Some(delay) = send_delay {
                         sleep(delay);
                     }

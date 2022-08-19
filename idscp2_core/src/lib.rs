@@ -5,6 +5,7 @@ use std::io::Write;
 use std::time::Instant;
 
 use bytes::{Buf, Bytes, BytesMut};
+use log::trace;
 use protobuf::{CodedOutputStream, Message};
 
 use crate::api::idscp2_config::IdscpConfig;
@@ -69,11 +70,11 @@ impl<'fsm> IdscpConnection<'fsm> {
     /// Returns a new initialized `IdscpConnection` ready to communicate with another peer
     pub fn connect(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
         let ra_prover_manager = RaManager::new(
-            &config.ra_config.prover_registry,
+            config.ra_config.prover_registry,
             &config.ra_config.peer_cert,
         );
         let ra_verifier_manager = RaManager::new(
-            &config.ra_config.verifier_registry,
+            config.ra_config.verifier_registry,
             &config.ra_config.peer_cert,
         );
         let mut fsm = Fsm::new(daps_driver, config);
@@ -114,12 +115,12 @@ impl<'fsm> IdscpConnection<'fsm> {
         // unwrap() is called since we expect the fsm to never fail expired timouts, though this may
         // be changed.
         if let Some(timeout) = &self.dat_timeout {
-            if timeout < &now {
+            if timeout < now {
                 self.process_event(FsmEvent::DatExpired);
             }
         }
         if let Some(timeout) = &self.ra_timeout {
-            if timeout < &now {
+            if timeout < now {
                 self.process_event(FsmEvent::FromUpper(RequestReattestation("timeout")));
             }
         }
@@ -127,7 +128,7 @@ impl<'fsm> IdscpConnection<'fsm> {
 
     fn check_resend_timeout(&mut self, now: &Instant) {
         if let Some(timeout) = &self.reset_data_timeout {
-            if timeout < &now {
+            if timeout < now {
                 self.process_event(FsmEvent::ResendTimout);
             }
         }
@@ -144,22 +145,24 @@ impl<'fsm> IdscpConnection<'fsm> {
             match action {
                 // Outgoing messages
                 FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => {
-                    // push outgoing message to send queue
-                    println!("message going out sec channel action");
+                    trace!("FsmAction SecureChannel: Pushing message to send queue");
                     self.send_queue.push(msg);
                 }
                 FsmAction::NotifyUserData(data) => {
+                    trace!("FsmAction NotifyUserData: Pushing message to receive queue");
                     self.recv_queue.append(data);
                 }
 
                 // Timeouts
                 FsmAction::SetDatTimeout(timeout) => {
+                    trace!("FsmAction SetDatTimeout: Set to {}s", timeout.as_secs());
                     self.dat_timeout = Some(Instant::now() + timeout);
                 }
                 FsmAction::StopDatTimeout => {
                     self.dat_timeout = None;
                 }
                 FsmAction::SetRaTimeout(timeout) => {
+                    trace!("FsmAction SetRaTimeout: Set to {}s", timeout.as_secs());
                     self.ra_timeout = Some(Instant::now() + timeout);
                 }
                 FsmAction::StopRaTimeout => {
@@ -175,25 +178,29 @@ impl<'fsm> IdscpConnection<'fsm> {
                 // Prover/Verifier communication
                 // TODO error management
                 FsmAction::StartProver(prover) => {
+                    trace!("FsmAction StartProver: Starting selected Prover {}", prover);
                     self.ra_prover_manager.select_driver(prover);
                     self.ra_prover_manager.run_driver();
                 }
                 FsmAction::StartVerifier(verifier) => {
+                    trace!("FsmAction StartVerifier: Starting selected Verifier {}", verifier);
                     self.ra_verifier_manager.select_driver(verifier);
                     self.ra_verifier_manager.run_driver();
                 }
                 FsmAction::RestartProver => {
-                    println!("restart prover");
+                    trace!("FsmAction RestartProver");
                     self.ra_prover_manager.run_driver().unwrap();
                 }
                 FsmAction::RestartVerifier => {
-                    println!("restart verifier");
+                    trace!("FsmAction RestartVerifier");
                     self.ra_verifier_manager.run_driver().unwrap();
                 }
                 FsmAction::ToProver(msg) => {
+                    trace!("FsmAction ToProver");
                     self.ra_prover_manager.send_msg(msg);
                 }
                 FsmAction::ToVerifier(msg) => {
+                    trace!("FsmAction ToVerifier");
                     self.ra_verifier_manager.send_msg(msg);
                 }
 
@@ -207,29 +214,9 @@ impl<'fsm> IdscpConnection<'fsm> {
 
     pub fn check_drivers(&mut self) {
         while let Some(msg) = self.ra_verifier_manager.recv_msg() {
-            match &msg {
-                RaMessage::Ok(_) => {
-                    println!("got msg from verifi ok");}
-                RaMessage::Failed() => {
-                    println!("got msg from verifi failed");
-                }
-                RaMessage::RawData(data, _) => {
-                    println!("got msg from verifi data {:?}", data);
-                }
-            }
             self.process_event(FsmEvent::FromRaVerifier(msg));
         }
         while let Some(msg) = self.ra_prover_manager.recv_msg() {
-            match &msg {
-                RaMessage::Ok(_) => {
-                    println!("got msg from prover ok");}
-                RaMessage::Failed() => {
-                    println!("got msg from prover failed");
-                }
-                RaMessage::RawData(data, _) => {
-                    println!("got msg from prover data {:?}", data);
-                }
-            }
             self.process_event(FsmEvent::FromRaProver(msg));
         }
     }
@@ -439,6 +426,18 @@ mod tests {
         };
     }
 
+    fn read_channel(peer2: &mut IdscpConnection, channel: &mut BytesMut) {
+        let mut chunk_start = 0;
+        while chunk_start < channel.len() {
+            match peer2.read(channel.split_to(channel.len())) {
+                Ok(n) => chunk_start += n,
+                Err(e) => {
+                    panic!("{:?}", e)
+                }
+            }
+        }
+    }
+
     fn spawn_peers<'a>(
         daps_driver_1: &'a mut dyn DapsDriver,
         daps_driver_2: &'a mut dyn DapsDriver,
@@ -460,16 +459,8 @@ mod tests {
                 channel1_2 = writer.into_inner();
             }
 
-            let mut chunk_start = 0;
-            while chunk_start < channel1_2.len() {
-                match peer2.read(channel1_2.split_to(channel1_2.len())) {
-                    Ok(n) => chunk_start += n,
-                    Err(e) => {
-                        panic!("{:?}", e)
-                    }
-                }
-            }
-            channel1_2.reserve(MTU);
+            read_channel(&mut peer2, &mut channel1_2);
+            channel2_1.reserve(MTU);
             peer2.check_drivers();
 
             while peer2.wants_write() {
@@ -478,19 +469,11 @@ mod tests {
                 channel2_1 = writer.into_inner();
             }
 
-            let mut chunk_start = 0;
-            while chunk_start < channel2_1.len() {
-                match peer1.read(channel2_1.split_to(channel2_1.len())) {
-                    Ok(n) => chunk_start += n,
-                    Err(e) => {
-                        panic!("{:?}", e)
-                    }
-                }
-            }
+            read_channel(&mut peer1, &mut channel2_1);
             channel2_1.reserve(MTU);
         }
 
-        return Ok((peer1, peer2, channel1_2, channel2_1));
+        Ok((peer1, peer2, channel1_2, channel2_1))
     }
 
     #[test]
@@ -527,15 +510,7 @@ mod tests {
         assert!(n > 0 && n == channel1_2.len());
 
         // peer2 reads from channel
-        let mut chunk_start = 0;
-        while chunk_start < channel1_2.len() {
-            match peer2.read(channel1_2.split_to(channel1_2.len())) {
-                Ok(n) => chunk_start += n,
-                Err(e) => {
-                    panic!("{:?}", e)
-                }
-            }
-        }
+        read_channel(&mut peer2, &mut channel1_2);
 
         // receive msg and compare from peer2
         let recv_msg = peer2.recv().unwrap();
@@ -551,14 +526,6 @@ mod tests {
         assert!(n > 0 && n == channel2_1.len());
 
         // peer2 reads from channel
-        let mut chunk_start = 0;
-        while chunk_start < channel2_1.len() {
-            match peer1.read(channel2_1.split_to(channel2_1.len())) {
-                Ok(n) => chunk_start += n,
-                Err(e) => {
-                    panic!("{:?}", e)
-                }
-            }
-        }
+        read_channel(&mut peer1, &mut channel2_1);
     }
 }
