@@ -94,6 +94,7 @@ pub(crate) enum SecureChannelAction {
 #[derive(Debug, Clone)]
 pub(crate) enum UserEvent {
     StartHandshake,
+    #[allow(dead_code)] // FIXME use this in destructor/close
     CloseConnection,
     RequestReattestation(&'static str), //includes cause
     Data(Bytes),                        // ref-counted
@@ -496,11 +497,11 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
 
                 self.prover = RaState::Working;
                 actions.push(FsmAction::RestartProver);
-                actions.push(FsmAction::SecureChannelAction(SecureChannelAction::Message(
-                    idscp_message_factory::create_idscp_dat(Bytes::from(
-                        self.daps_driver.get_token(),
+                actions.push(FsmAction::SecureChannelAction(
+                    SecureChannelAction::Message(idscp_message_factory::create_idscp_dat(
+                        Bytes::from(self.daps_driver.get_token()),
                     )),
-                )));
+                ));
                 actions
             }
 
@@ -779,13 +780,13 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
 
     /// Returns `true` if a connection to another peer is set up and not closed.
     /// Does not check if the connection has been validated.
-    pub(crate) fn is_connected(&self) -> bool {
+    pub(crate) fn is_open(&self) -> bool {
         self.state == ProtocolState::Running
     }
 
     /// Returns `true` if the connection is verified and can be used to exchange data.
-    pub(crate) fn is_verified(&self) -> bool {
-        self.is_connected()
+    pub(crate) fn is_attested(&self) -> bool {
+        self.is_open()
             && self.dat_timeout == TimeoutState::Active
             && self.prover == RaState::Done
             && self.verifier == RaState::Done
@@ -795,7 +796,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
     /// Returns `true` if data can be sent in the current state.
     /// This is the case, if the connection is verified and all sent data has been acknowledged by the connected peer.
     pub(crate) fn is_ready_to_send(&self) -> bool {
-        self.is_verified() && self.resend_timeout == TimeoutState::Inactive
+        self.is_attested() && self.resend_timeout == TimeoutState::Inactive
     }
 
     // workaround

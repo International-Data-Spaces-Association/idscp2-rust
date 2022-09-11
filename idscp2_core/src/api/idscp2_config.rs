@@ -6,6 +6,8 @@ use std::time::Duration;
 pub(crate) type Certificate = X509;
 
 pub struct IdscpConfig<'a> {
+    /// for logging purposes only
+    pub id: &'static str,
     pub resend_timeout: Duration,
     pub ra_config: &'a AttestationConfig<'a>,
 }

@@ -15,4 +15,5 @@ rust_tpm_verifier = { git = "ssh://git@gitlab.cc-asp.fraunhofer.de/idscp2.0/rust
 #webpki = "0.21.4"
 
 [features]
+default = []
 ra_tpm = ["dep:rust_tpm_verifier"]

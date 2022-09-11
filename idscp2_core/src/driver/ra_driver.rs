@@ -1,8 +1,10 @@
 use crate::api::idscp2_config::Certificate;
 use crate::RaMessage;
+use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -14,10 +16,13 @@ use thiserror::Error;
 /// the driver. It provides a synchronous common interface to which message bytes can be passed and
 /// from which message bytes can be returned. These message bytes originate/are sent to another
 /// compatible driver.
+#[async_trait]
 pub trait RaDriverInstance<RaType> {
     // TODO is this needed?
     /// Returns the identifier of this driver
     fn get_id(&self) -> DriverId;
+
+    // TODO more async funcions?
 
     /// Signal to the `RaDriverInstance` that the start of a (re-)attestation is requested.
     /// Trigger-function that is called whenever the connection requires attestation.
@@ -30,7 +35,7 @@ pub trait RaDriverInstance<RaType> {
     /// Synchronously returns any output message if available. This message may be some `RawData`
     /// bytes destined for the driver at the other end of the connection or a `ControlMessage`
     /// indicating to the connection that some process has been completed.
-    fn recv_msg(&mut self) -> Option<RaMessage<RaType>>;
+    async fn recv_msg(&mut self) -> RaMessage<RaType>;
 }
 
 /// Executable drivers capable of being started synchronously once and to process (re-)attestation
@@ -105,13 +110,20 @@ pub(crate) struct RaManager<'reg, RaType> {
     id: Option<DriverId>, // TODO redundant
 }
 
+// TODO naming
+pub enum RaManagerEvent<RaType> {
+    SelectDriver(DriverId),
+    RunDriver,
+    RawData(Bytes, PhantomData<RaType>),
+}
+
 ///
 #[derive(Debug, Error)]
 pub(crate) enum RaManagerError {
     #[error("The input could not be processed")]
     DriverUnregistered,
-    #[error("The input could not be processed")]
-    DriverNotStarted,
+    // #[error("The input could not be processed")]
+    // DriverNotStarted,
 }
 
 impl<'reg, RaType> RaManager<'reg, RaType> {
@@ -125,13 +137,25 @@ impl<'reg, RaType> RaManager<'reg, RaType> {
         }
     }
 
-    /// Launches the driver with identifier `id` registered in the registry
+    pub fn process_event(&mut self, event: RaManagerEvent<RaType>) -> Result<(), RaManagerError> {
+        match event {
+            RaManagerEvent::SelectDriver(id) => self.select_driver(id),
+            RaManagerEvent::RunDriver => self.run_driver(),
+            RaManagerEvent::RawData(msg, _) => {
+                self.send_msg(msg);
+                Ok(())
+            },
+        }
+    }
+
+    /// Internally selects the driver with identifier `id` for running.
+    /// Returns an error, if `id` is not present in the registry.
     pub fn select_driver(&mut self, id: DriverId) -> Result<(), RaManagerError> {
         self.id = Some(id);
         let driver = self
             .registry
             .get_driver(&id)
-            .ok_or_else(|| RaManagerError::DriverUnregistered)?
+            .ok_or(RaManagerError::DriverUnregistered)?
             .clone();
         self.active_driver = Some(driver);
         Ok(())
@@ -142,8 +166,8 @@ impl<'reg, RaType> RaManager<'reg, RaType> {
             let driver = self
                 .active_driver
                 .as_ref()
-                .ok_or_else(|| RaManagerError::DriverUnregistered)?;
-            let instance = driver.new_instance(&self.cert);
+                .ok_or(RaManagerError::DriverUnregistered)?;
+            let instance = driver.new_instance(self.cert);
 
             self.active_instance = Some(instance);
         }
@@ -151,10 +175,17 @@ impl<'reg, RaType> RaManager<'reg, RaType> {
         Ok(())
     }
 
-    pub fn recv_msg(&mut self) -> Option<RaMessage<RaType>> {
+    pub fn recv_msg(
+        &mut self,
+    ) -> Option<
+        std::pin::Pin<
+            std::boxed::Box<
+                dyn futures::Future<Output = RaMessage<RaType>> + std::marker::Send + '_,
+            >,
+        >,
+    > {
         self.active_instance
-            .as_mut()
-            .and_then(|instance| instance.recv_msg())
+            .as_mut().map(|instance| instance.recv_msg())
     }
 
     pub fn send_msg(&mut self, msg: Bytes) {
@@ -175,10 +206,12 @@ pub(crate) mod tests {
     use crate::api::idscp2_config::Certificate;
     use crate::driver::ra_driver::{DriverId, RaDriver, RaDriverInstance, RaMessage};
     use crate::{RaProverType, RaVerifierType};
+    use async_trait::async_trait;
     use bytes::Bytes;
     use std::fs;
     use std::marker::PhantomData;
     use std::path::PathBuf;
+    use tokio::select;
 
     pub(crate) const TEST_PROVER_ID: DriverId = "test.prover";
     pub(crate) const TEST_VERIFIER_ID: DriverId = "test.prover";
@@ -212,6 +245,7 @@ pub(crate) mod tests {
         Failed,
     }
 
+    #[async_trait]
     impl RaDriverInstance<RaVerifierType> for TestVerifierInstance {
         fn get_id(&self) -> DriverId {
             TEST_PROVER_ID
@@ -232,24 +266,53 @@ pub(crate) mod tests {
             }
         }
 
-        fn recv_msg(&mut self) -> Option<RaMessage<RaVerifierType>> {
-            match &self.state {
-                TestVerifierState::Begin(msg) => {
-                    let msg = msg.clone();
-                    self.state = TestVerifierState::WaitingForReply;
-                    Some(RaMessage::RawData(msg, PhantomData))
+        async fn recv_msg(&mut self) -> RaMessage<RaVerifierType> {
+            loop {
+                match &self.state {
+                    TestVerifierState::Begin(msg) => {
+                        let msg = msg.clone();
+                        self.state = TestVerifierState::WaitingForReply;
+                        return RaMessage::RawData(msg, PhantomData);
+                    }
+                    TestVerifierState::Ok(msg) => {
+                        let msg = msg.clone();
+                        self.state = TestVerifierState::Idle;
+                        return RaMessage::Ok(msg);
+                    }
+                    TestVerifierState::Failed => {
+                        self.state = TestVerifierState::Idle;
+                        return RaMessage::Failed();
+                    }
+                    _ => {
+                        // println!("a");
+                        tokio::task::yield_now().await;
+                    }
                 }
-                TestVerifierState::Ok(msg) => {
-                    let msg = msg.clone();
-                    self.state = TestVerifierState::Idle;
-                    Some(RaMessage::Ok(msg))
-                }
-                TestVerifierState::Failed => {
-                    self.state = TestVerifierState::Idle;
-                    Some(RaMessage::Failed())
-                }
-                _ => None,
             }
+            /*
+            loop {
+                let mut state = self.state.lock().await;
+                match state.deref() {
+                    TestVerifierState::Begin(msg) => {
+                        let msg = msg.clone();
+                        *state = TestVerifierState::WaitingForReply;
+                        return RaMessage::RawData(msg, PhantomData);
+                    }
+                    TestVerifierState::Ok(msg) => {
+                        let msg = msg.clone();
+                        *state = TestVerifierState::Idle;
+                        return RaMessage::Ok(msg);
+                    }
+                    TestVerifierState::Failed => {
+                        *state = TestVerifierState::Idle;
+                        return RaMessage::Failed();
+                    }
+                    _ => {
+                        println!("a");
+                    },
+                }
+            }
+             */
         }
     }
 
@@ -283,6 +346,7 @@ pub(crate) mod tests {
         Failed,
     }
 
+    #[async_trait]
     impl RaDriverInstance<RaProverType> for TestProverInstance {
         fn get_id(&self) -> DriverId {
             TEST_VERIFIER_ID
@@ -295,13 +359,12 @@ pub(crate) mod tests {
         fn send_msg(&mut self, msg: Bytes) {
             match &self.state {
                 TestProverState::WaitingForBegin => {
-                    self.state = TestProverState::Reply(Bytes::from(
-                        if msg == *"test_begin_attest" {
+                    self.state =
+                        TestProverState::Reply(Bytes::from(if msg == *"test_begin_attest" {
                             "test_report"
                         } else {
                             "test_failure"
-                        },
-                    ));
+                        }));
                 }
                 TestProverState::WaitingForResponse => {
                     self.state = if msg == *"test_ok" {
@@ -314,22 +377,27 @@ pub(crate) mod tests {
             }
         }
 
-        fn recv_msg(&mut self) -> Option<RaMessage<RaProverType>> {
-            match &self.state {
-                TestProverState::Reply(msg) => {
-                    let msg = msg.clone();
-                    self.state = TestProverState::WaitingForResponse;
-                    Some(RaMessage::RawData(msg, PhantomData))
+        async fn recv_msg(&mut self) -> RaMessage<RaProverType> {
+            loop {
+                match &self.state {
+                    TestProverState::Reply(msg) => {
+                        let msg = msg.clone();
+                        self.state = TestProverState::WaitingForResponse;
+                        return RaMessage::RawData(msg, PhantomData);
+                    }
+                    TestProverState::Ok => {
+                        self.state = TestProverState::Idle;
+                        return RaMessage::Ok(Bytes::from("test_ok"));
+                    }
+                    TestProverState::Failed => {
+                        self.state = TestProverState::Idle;
+                        return RaMessage::Failed();
+                    }
+                    _ => {
+                        // println!("b");
+                        tokio::task::yield_now().await;
+                    }
                 }
-                TestProverState::Ok => {
-                    self.state = TestProverState::Idle;
-                    Some(RaMessage::Ok(Bytes::from("unused")))
-                }
-                TestProverState::Failed => {
-                    self.state = TestProverState::Idle;
-                    Some(RaMessage::Failed())
-                }
-                _ => None,
             }
         }
     }
@@ -345,9 +413,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn ra_test_driver_communication() {
+    fn async_ra_test_driver_communication() {
         let verifier_driver = TestVerifier {};
-        let prover_driver  = TestProver {};
+        let prover_driver = TestProver {};
 
         let cert = get_test_cert();
         let mut verifier_instance = verifier_driver.new_instance(&cert);
@@ -359,44 +427,53 @@ pub(crate) mod tests {
         let mut verifier_ok = false;
         let mut prover_ok = false;
 
-        while !prover_ok || !verifier_ok {
-            let mut loop_idle = true;
-            match verifier_instance.recv_msg() {
-                None => {}
-                Some(RaMessage::RawData(msg, ..)) => {
-                    loop_idle = false;
-                    println!("Passing msg V->P {:?}", msg);
-                    prover_instance.send_msg(msg);
+        println!("Starting test");
+
+        tokio_test::block_on(async {
+            while !prover_ok || !verifier_ok {
+                let loop_idle;
+
+                select! {
+                    msg = verifier_instance.recv_msg() => {
+                        match msg {
+                            RaMessage::RawData(msg, ..) => {
+                                loop_idle = false;
+                                println!("Passing msg V->P {:?}", msg);
+                                prover_instance.send_msg(msg);
+                            }
+                            RaMessage::Ok(msg) => {
+                                loop_idle = false;
+                                println!("Verifier Ok. Passing msg V->P {:?}", msg);
+                                prover_instance.send_msg(msg);
+                                verifier_ok = true;
+                            }
+                            RaMessage::Failed() => {
+                                panic!("Test Verifier Failed");
+                            }
+                        }
+                    }
+                    msg = prover_instance.recv_msg() => {
+                        match msg {
+                            RaMessage::RawData(msg, ..) => {
+                                loop_idle = false;
+                                println!("Passing msg P->V {:?}", msg);
+                                verifier_instance.send_msg(msg);
+                            }
+                            RaMessage::Ok(_) => {
+                                loop_idle = false;
+                                println!("Prover Ok");
+                                prover_ok = true;
+                            }
+                            RaMessage::Failed() => {
+                                panic!("Test Prover Failed");
+                            }
+                        }
+                    }
                 }
-                Some(RaMessage::Ok(msg)) => {
-                    loop_idle = false;
-                    println!("Verifier Ok. Passing msg V->P {:?}", msg);
-                    prover_instance.send_msg(msg);
-                    verifier_ok = true;
-                }
-                Some(RaMessage::Failed()) => {
-                    panic!("Test Verifier Failed");
+                if loop_idle {
+                    panic!("Prover and Verifier deadlocked.");
                 }
             }
-            match prover_instance.recv_msg() {
-                None => {}
-                Some(RaMessage::RawData(msg, ..)) => {
-                    loop_idle = false;
-                    println!("Passing msg P->V {:?}", msg);
-                    verifier_instance.send_msg(msg);
-                }
-                Some(RaMessage::Ok(_)) => {
-                    loop_idle = false;
-                    println!("Prover Ok");
-                    prover_ok = true;
-                }
-                Some(RaMessage::Failed()) => {
-                    panic!("Test Prover Failed");
-                }
-            }
-            if loop_idle {
-                panic!("Prover and Verifier deadlocked.");
-            }
-        }
+        });
     }
 }

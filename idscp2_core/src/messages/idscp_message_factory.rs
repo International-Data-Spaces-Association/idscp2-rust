@@ -9,8 +9,8 @@ use std::iter::FromIterator;
 
 pub(crate) fn create_idscp_hello(
     dat: Bytes,
-    expected_rat_suite: &Vec<DriverId>,
-    supported_rat_suite: &Vec<DriverId>,
+    expected_rat_suite: &[DriverId],
+    supported_rat_suite: &[DriverId],
 ) -> IdscpMessage {
     let mut idscp_dat = IdscpDat::new();
     idscp_dat.token = dat;

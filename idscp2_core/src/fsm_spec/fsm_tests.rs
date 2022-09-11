@@ -1,4 +1,5 @@
 use crate::driver::ra_driver::tests::get_test_cert;
+use crate::messages::idscpv2_messages::IdscpClose_CloseCause;
 use crate::msg_factory::create_idscp_hello;
 use crate::{
     api::idscp2_config::{AttestationConfig, IdscpConfig},
@@ -7,7 +8,6 @@ use crate::{
 };
 use bytes::Bytes;
 use std::{marker::PhantomData, time::Duration, vec};
-use crate::messages::idscpv2_messages::IdscpClose_CloseCause;
 
 use super::fsm::*;
 
@@ -59,6 +59,7 @@ impl DapsDriver for TestDaps {
 }
 
 #[test]
+#[allow(clippy::bool_assert_comparison)]
 fn normal_sequence() {
     let mut daps_driver = TestDaps::default();
     let ra_config = AttestationConfig {
@@ -70,6 +71,7 @@ fn normal_sequence() {
         peer_cert: get_test_cert(),
     };
     let config = IdscpConfig {
+        id: "",
         ra_config: &ra_config,
         resend_timeout: Duration::from_secs(5),
     };
@@ -339,6 +341,7 @@ fn ra_driver_match_complex_sequence() {
         peer_cert: get_test_cert(),
     };
     let config = IdscpConfig {
+        id: "",
         ra_config: &ra_config,
         resend_timeout: Duration::from_secs(5),
     };
@@ -365,7 +368,7 @@ fn ra_driver_match_complex_sequence() {
     )));
 
     if let FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) = &actions[0] {
-        if let IdscpMessage_oneof_message::idscpClose(close_msg)= msg.message.as_ref().unwrap() {
+        if let IdscpMessage_oneof_message::idscpClose(close_msg) = msg.message.as_ref().unwrap() {
             panic!("{:?}", close_msg.cause_code);
         }
     }
@@ -392,6 +395,7 @@ fn ra_driver_match_error_sequence() {
         peer_cert: get_test_cert(),
     };
     let config = IdscpConfig {
+        id: "",
         ra_config: &ra_config,
         resend_timeout: Duration::from_secs(5),
     };
@@ -444,6 +448,7 @@ fn verifier_error_sequence() {
         peer_cert: get_test_cert(),
     };
     let config = IdscpConfig {
+        id: "",
         ra_config: &ra_config,
         resend_timeout: Duration::from_secs(5),
     };

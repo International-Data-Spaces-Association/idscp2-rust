@@ -1,16 +1,18 @@
 extern crate core;
 
+use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::io::Write;
+use std::marker::PhantomData;
 use std::time::Instant;
 
 use bytes::{Buf, Bytes, BytesMut};
-use log::trace;
+use log::{error, info, trace, warn};
 use protobuf::{CodedOutputStream, Message};
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
-use crate::driver::ra_driver::RaManager;
+use crate::driver::ra_driver::{RaManager, RaManagerEvent};
 use crate::messages::idscpv2_messages::IdscpMessage_oneof_message;
 use crate::UserEvent::RequestReattestation;
 use chunkvec::ChunkVecBuffer;
@@ -45,20 +47,24 @@ pub enum IdscpConnectionError {
 }
 
 pub struct IdscpConnection<'fsm> {
-    /// attestation manager launching and communicating with provers
-    ra_prover_manager: RaManager<'fsm, RaProverType>,
-    /// attestation manager launching and communicating with provers
-    ra_verifier_manager: RaManager<'fsm, RaVerifierType>,
+    /// debug identifier
+    id: &'fsm str,
     /// state machine
     fsm: Fsm<'fsm, 'fsm>,
-    /// internal buffer of messages to be sent to the connected peer
-    send_queue: Vec<IdscpMessage>,
-    /// internal buffer of partial bytes  received from the connected peer
-    read_queue: ChunkVecBuffer<BytesMut>,
-    /// length of the next expected, but partially received frame from the connected peer
-    partial_read_len: Option<LengthPrefix>,
-    /// internal buffer of payload parsed from the connected peer to be received
-    recv_queue: ChunkVecBuffer<Bytes>,
+
+    // Buffers
+    /// buffer of partial bytes received from out_conn
+    read_out_conn_queue: ChunkVecBuffer<BytesMut>,
+    /// length of the next expected, but partially received frame from out_conn
+    read_out_conn_partial_len: Option<LengthPrefix>,
+    /// buffer for messages to be sent to out_conn
+    write_out_conn_queue: Vec<IdscpMessage>,
+    /// buffer of payload parsed from the connected peer destined for the user
+    write_in_user_queue: ChunkVecBuffer<Bytes>,
+    /// buffer of messages destined for the verifier manager
+    write_ra_verifier_queue: VecDeque<RaManagerEvent<RaVerifierType>>, // TODO ArrayDeque?
+    /// buffer of messages destined for the prover manager
+    write_ra_prover_queue: VecDeque<RaManagerEvent<RaProverType>>,
 
     // Timeouts
     dat_timeout: Option<Instant>,
@@ -69,63 +75,78 @@ pub struct IdscpConnection<'fsm> {
 impl<'fsm> IdscpConnection<'fsm> {
     /// Returns a new initialized `IdscpConnection` ready to communicate with another peer
     pub fn connect(daps_driver: &'fsm mut dyn DapsDriver, config: &'fsm IdscpConfig<'fsm>) -> Self {
-        let ra_prover_manager = RaManager::new(
-            config.ra_config.prover_registry,
-            &config.ra_config.peer_cert,
-        );
-        let ra_verifier_manager = RaManager::new(
-            config.ra_config.verifier_registry,
-            &config.ra_config.peer_cert,
-        );
-        let mut fsm = Fsm::new(daps_driver, config);
-        let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::StartHandshake));
+        let fsm = Fsm::new(daps_driver, config);
         let mut conn = Self {
-            ra_prover_manager,
-            ra_verifier_manager,
+            id: config.id,
             fsm,
-            send_queue: vec![],
-            read_queue: Default::default(),
-            recv_queue: Default::default(),
-            partial_read_len: None,
+            read_out_conn_queue: Default::default(),
+            read_out_conn_partial_len: None,
+            write_out_conn_queue: vec![],
+            write_in_user_queue: Default::default(),
+            write_ra_verifier_queue: Default::default(),
+            write_ra_prover_queue: Default::default(),
             dat_timeout: None,
             ra_timeout: None,
             reset_data_timeout: None,
         };
-        conn.do_actions(actions);
+        conn.process_event(FsmEvent::FromUpper(UserEvent::StartHandshake));
+        info!("{}: Created connection", conn.id);
 
         conn
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.fsm.is_connected()
+    /*
+    pub fn check_drivers(&mut self) {
+        while let Some(msg) = self.ra_verifier_manager.recv_msg() {
+            self.process_event(FsmEvent::FromRaVerifier(msg));
+        }
+        while let Some(msg) = self.ra_prover_manager.recv_msg() {
+            self.process_event(FsmEvent::FromRaProver(msg));
+        }
+    }
+    */
+
+    /// Returns `true`, if the connection is in an active communication with another peer, i.e.,
+    /// initialized and not closed.
+    pub fn is_open(&self) -> bool {
+        self.fsm.is_open()
     }
 
-    pub fn is_verified(&self) -> bool {
-        self.fsm.is_verified()
+    /// Returns `true`, if the connection is connected and attestation has been completed and not
+    /// timed out.
+    pub fn is_attested(&self) -> bool {
+        self.fsm.is_attested()
     }
 
+    /// Returns `true`, if the connection is connected, attested, and available for sending data.
+    /// This may not be the case, if previously sent data has not been acknowledged by the connected
+    /// peer.
     pub fn is_ready_to_send(&self) -> bool {
         self.fsm.is_ready_to_send()
     }
 
-    /// Checks internal timeouts and issues all actions required to return the internal state
-    /// machine to a state where data can be transferred again.
+    /// Checks internal attestation timeouts and issues all actions required to return the internal
+    /// state machine to a state where data can be transferred again.
     fn check_attestation_timeouts(&mut self, now: &Instant) {
         // Note: the order is important, since some timeouts may be cancelled out by other timeouts.
         // unwrap() is called since we expect the fsm to never fail expired timouts, though this may
         // be changed.
         if let Some(timeout) = &self.dat_timeout {
             if timeout < now {
+                trace!("{}: check_attestation_timeouts: DAT timed out.", self.id);
                 self.process_event(FsmEvent::DatExpired);
             }
         }
         if let Some(timeout) = &self.ra_timeout {
             if timeout < now {
+                trace!("{}: check_attestation_timeouts: DAT timed out.", self.id);
                 self.process_event(FsmEvent::FromUpper(RequestReattestation("timeout")));
             }
         }
     }
 
+    /// Checks internal resend timeout and issues all actions required to return the internal
+    /// state machine to a state where data can be transferred again.
     fn check_resend_timeout(&mut self, now: &Instant) {
         if let Some(timeout) = &self.reset_data_timeout {
             if timeout < now {
@@ -134,35 +155,47 @@ impl<'fsm> IdscpConnection<'fsm> {
         }
     }
 
+    /// Passes an event to the internal state machine and executes all actions commanded by the
+    /// state machine.
     fn process_event(&mut self, event: FsmEvent) {
         let actions = self.fsm.process_event(event);
-        self.do_actions(actions);
-    }
 
-    #[inline]
-    fn do_actions<T: IntoIterator<Item = FsmAction>>(&mut self, action_vec: T) {
-        for action in action_vec {
+        for action in actions {
             match action {
                 // Outgoing messages
                 FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => {
-                    trace!("FsmAction SecureChannel: Pushing message to send queue");
-                    self.send_queue.push(msg);
+                    trace!(
+                        "{}: FsmAction SecureChannel: Pushing message to send queue",
+                        self.id
+                    );
+                    self.write_out_conn_queue.push(msg);
                 }
                 FsmAction::NotifyUserData(data) => {
-                    trace!("FsmAction NotifyUserData: Pushing message to receive queue");
-                    self.recv_queue.append(data);
+                    trace!(
+                        "{}: FsmAction NotifyUserData: Pushing message to receive queue",
+                        self.id
+                    );
+                    self.write_in_user_queue.append(data);
                 }
 
                 // Timeouts
                 FsmAction::SetDatTimeout(timeout) => {
-                    trace!("FsmAction SetDatTimeout: Set to {}s", timeout.as_secs());
+                    trace!(
+                        "{}: FsmAction SetDatTimeout: Set timeout to {}s",
+                        self.id,
+                        timeout.as_secs()
+                    );
                     self.dat_timeout = Some(Instant::now() + timeout);
                 }
                 FsmAction::StopDatTimeout => {
                     self.dat_timeout = None;
                 }
                 FsmAction::SetRaTimeout(timeout) => {
-                    trace!("FsmAction SetRaTimeout: Set to {}s", timeout.as_secs());
+                    trace!(
+                        "{}: FsmAction SetRaTimeout: Set timeout to {}s",
+                        self.id,
+                        timeout.as_secs()
+                    );
                     self.ra_timeout = Some(Instant::now() + timeout);
                 }
                 FsmAction::StopRaTimeout => {
@@ -177,31 +210,47 @@ impl<'fsm> IdscpConnection<'fsm> {
 
                 // Prover/Verifier communication
                 // TODO error management
-                FsmAction::StartProver(prover) => {
-                    trace!("FsmAction StartProver: Starting selected Prover {}", prover);
-                    self.ra_prover_manager.select_driver(prover);
-                    self.ra_prover_manager.run_driver();
+                FsmAction::StartVerifier(id) => {
+                    trace!(
+                        "{}: FsmAction StartVerifier: Starting selected Verifier {}",
+                        self.id,
+                        id
+                    );
+                    self.write_ra_verifier_queue
+                        .push_back(RaManagerEvent::SelectDriver(id));
+                    self.write_ra_verifier_queue
+                        .push_back(RaManagerEvent::RunDriver);
                 }
-                FsmAction::StartVerifier(verifier) => {
-                    trace!("FsmAction StartVerifier: Starting selected Verifier {}", verifier);
-                    self.ra_verifier_manager.select_driver(verifier);
-                    self.ra_verifier_manager.run_driver();
-                }
-                FsmAction::RestartProver => {
-                    trace!("FsmAction RestartProver");
-                    self.ra_prover_manager.run_driver().unwrap();
+                FsmAction::StartProver(id) => {
+                    trace!(
+                        "{}: FsmAction StartProver: Starting selected Prover {}",
+                        self.id,
+                        id
+                    );
+                    self.write_ra_prover_queue
+                        .push_back(RaManagerEvent::SelectDriver(id));
+                    self.write_ra_prover_queue
+                        .push_back(RaManagerEvent::RunDriver);
                 }
                 FsmAction::RestartVerifier => {
-                    trace!("FsmAction RestartVerifier");
-                    self.ra_verifier_manager.run_driver().unwrap();
+                    trace!("{}: FsmAction RestartVerifier", self.id);
+                    self.write_ra_verifier_queue
+                        .push_back(RaManagerEvent::RunDriver);
                 }
-                FsmAction::ToProver(msg) => {
-                    trace!("FsmAction ToProver");
-                    self.ra_prover_manager.send_msg(msg);
+                FsmAction::RestartProver => {
+                    trace!("{}: FsmAction RestartProver", self.id);
+                    self.write_ra_prover_queue
+                        .push_back(RaManagerEvent::RunDriver);
                 }
                 FsmAction::ToVerifier(msg) => {
-                    trace!("FsmAction ToVerifier");
-                    self.ra_verifier_manager.send_msg(msg);
+                    trace!("{}: FsmAction ToVerifier", self.id);
+                    self.write_ra_verifier_queue
+                        .push_back(RaManagerEvent::RawData(msg, PhantomData::default()));
+                }
+                FsmAction::ToProver(msg) => {
+                    trace!("{}: FsmAction ToProver", self.id);
+                    self.write_ra_prover_queue
+                        .push_back(RaManagerEvent::RawData(msg, PhantomData::default()));
                 }
 
                 FsmAction::None => {
@@ -212,16 +261,7 @@ impl<'fsm> IdscpConnection<'fsm> {
         }
     }
 
-    pub fn check_drivers(&mut self) {
-        while let Some(msg) = self.ra_verifier_manager.recv_msg() {
-            self.process_event(FsmEvent::FromRaVerifier(msg));
-        }
-        while let Some(msg) = self.ra_prover_manager.recv_msg() {
-            self.process_event(FsmEvent::FromRaProver(msg));
-        }
-    }
-
-    /// Consumes `buf` and attempts to parse at least one message frame from another peer.
+    /// Consumes `buf` and attempts to parse at least one message frame from out_conn.
     /// Remaining bytes belonging to partial message frames are cached and parsed in a future call to `read`.
     /// This function checks potential channel timeouts during processing.
     ///
@@ -235,69 +275,91 @@ impl<'fsm> IdscpConnection<'fsm> {
     /// If this function encounters an error during parsing, an [`IdscpConnectionError::MalformedInput`] error is returned.
     /// If the state of the secure channel can no longer be trusted and messages received,
     ///
-    pub fn read(&mut self, buf: BytesMut) -> Result<usize, IdscpConnectionError> {
-        self.read_queue.append(buf);
-        self.parse_read_queue(0)
+    pub fn read_out_conn(&mut self, buf: BytesMut) -> Result<usize, IdscpConnectionError> {
+        trace!(
+            "{}: read_out_conn: Appending {} byte to read_out_queue",
+            self.id,
+            buf.len()
+        );
+        self.read_out_conn_queue.append(buf);
+        self.parse_read_out_queue(0)
     }
 
     /// Recursively parses and processes messages from the internal read buffer
-    fn parse_read_queue(&mut self, parsed_bytes: usize) -> Result<usize, IdscpConnectionError> {
-        let msg_length: LengthPrefix = match self.partial_read_len.take() {
+    fn parse_read_out_queue(&mut self, parsed_bytes: usize) -> Result<usize, IdscpConnectionError> {
+        let msg_length: LengthPrefix = match self.read_out_conn_partial_len.take() {
             Some(len) => len,
             None => {
-                if self.read_queue.len() >= LENGTH_PREFIX_SIZE {
-                    self.read_queue.get_u32()
+                if self.read_out_conn_queue.len() >= LENGTH_PREFIX_SIZE {
+                    self.read_out_conn_queue.get_u32()
                 } else {
                     return Ok(parsed_bytes);
                 }
             }
         };
 
-        if self.read_queue.remaining() < msg_length as usize {
+        if self.read_out_conn_queue.remaining() < msg_length as usize {
             // not enough bytes available to parse message
-            self.partial_read_len = Some(msg_length);
+            self.read_out_conn_partial_len = Some(msg_length);
             return Ok(parsed_bytes);
         }
 
-        let mut frame = self.read_queue.pop().unwrap();
+        let mut frame = self.read_out_conn_queue.pop().unwrap();
 
         // extend frame, can be zero-copy if the original buffer was contiguous
         while frame.len() < msg_length as usize {
-            let b = self.read_queue.pop().unwrap();
+            let b = self.read_out_conn_queue.pop().unwrap();
             frame.unsplit(b);
         }
 
         // reinsert the remainder to the read queue
         if frame.len() > msg_length as usize {
             let rem = frame.split_off(msg_length as usize);
-            self.read_queue.insert_front(rem);
+            self.read_out_conn_queue.insert_front(rem);
         }
 
         if let Ok(msg) = IdscpMessage::parse_from_carllerche_bytes(&frame.freeze()) {
             let m = msg.compute_size();
             assert_eq!(m, msg_length);
-            let msg_length = usize::try_from(m).unwrap();
+            let msg_len = usize::try_from(m).unwrap();
 
             // match if data?
             let msg = match msg.message.unwrap() {
                 IdscpMessage_oneof_message::idscpData(data_msg) => {
+                    trace!(
+                        "{}: read_out_conn: Parsed {} byte data message with {} byte payload",
+                        self.id,
+                        msg_len,
+                        data_msg.data.len()
+                    );
                     // check timeouts and continue only when ready
                     let now = Instant::now();
                     self.check_attestation_timeouts(&now);
                     // FIXME temporary fix: check if prover was successful from previous message
-                    self.check_drivers();
-                    if !self.is_verified() {
+                    // TODO self.check_drivers();
+                    if !self.is_attested() {
+                        warn!(
+                            "{}: read_out_conn: Connection not attested, discarding data",
+                            self.id
+                        );
                         return Err(IdscpConnectionError::NotReady);
                     }
                     IdscpMessage_oneof_message::idscpData(data_msg)
                 }
-                msg => msg,
+                msg => {
+                    trace!(
+                        "{}: read_out_conn: Parsed {} byte non-data message",
+                        self.id,
+                        msg_len
+                    );
+                    msg
+                }
             };
 
             let event = FsmEvent::FromSecureChannel(SecureChannelEvent::Message(msg));
 
             self.process_event(event);
-            self.parse_read_queue(LENGTH_PREFIX_SIZE + msg_length)
+            self.parse_read_out_queue(LENGTH_PREFIX_SIZE + msg_len)
         } else {
             Err(IdscpConnectionError::MalformedInput)
         }
@@ -305,20 +367,20 @@ impl<'fsm> IdscpConnection<'fsm> {
 
     /// Synchronously returns whether the connection has buffered message frames to be sent to
     /// the connected peer.
-    pub fn wants_write(&self) -> bool {
-        !self.send_queue.is_empty()
+    pub fn wants_write_out_conn(&self) -> bool {
+        !self.write_out_conn_queue.is_empty()
     }
 
     /// Writes the buffered message frames destined to the connected peer to `out`.
-    pub fn write(&mut self, out: &mut dyn Write) -> std::io::Result<usize> {
+    pub fn write_out_conn(&mut self, out: &mut dyn Write) -> std::io::Result<usize> {
         let mut written = 0usize;
 
-        if self.wants_write() {
+        if self.wants_write_out_conn() {
             // Workaround: serialize without the wrapper method of IdscpMessage to initialize and
             // use only a single buffer for length delimiters and messages
             let mut os = CodedOutputStream::new(out);
 
-            for msg in self.send_queue.drain(..) {
+            for msg in self.write_out_conn_queue.drain(..) {
                 let msg_length: u32 = msg.compute_size();
                 os.write_raw_bytes(msg_length.to_be_bytes().as_slice())?;
                 written += 4;
@@ -328,10 +390,15 @@ impl<'fsm> IdscpConnection<'fsm> {
             }
             os.flush()?;
         }
+        trace!(
+            "{}: write_out_conn: Write {} byte to out_conn",
+            self.id,
+            written
+        );
         Ok(written)
     }
 
-    /// Sends `data` to the connected peer.
+    /// Reads data from in_user destined to out_conn.
     /// This function checks potential channel timeouts during processing.
     ///
     /// # Return
@@ -344,7 +411,7 @@ impl<'fsm> IdscpConnection<'fsm> {
     /// If `data` is too large to be sent, an [`IdscpConnectionError::MalformedInput`] error is returned.
     /// Returns [`IdscpConnectionError::NotReady`], if the state of the secure channel can no longer be trusted and messages not sent.
     ///
-    pub fn send(&mut self, data: Bytes) -> Result<usize, IdscpConnectionError> {
+    pub fn read_in_user(&mut self, data: Bytes) -> Result<usize, IdscpConnectionError> {
         // the empty vector would not have worked, since the protobuf-encoded len of data also has
         // variable length that needs to be accounted for
         // no copy here, since data is ref-counted and dropped
@@ -354,6 +421,7 @@ impl<'fsm> IdscpConnection<'fsm> {
 
         // TODO maybe split data here to MAX_FRAME_SIZE
         if frame_size > buffer_space {
+            error!("{}: read_in_user: Malformed input by in_user", self.id);
             return Err(IdscpConnectionError::MalformedInput);
         }
 
@@ -361,26 +429,85 @@ impl<'fsm> IdscpConnection<'fsm> {
 
         // check timeouts and continue only when ready
         let now = Instant::now();
-        println!("sending> checking timeouts ({}, {})", self.is_ready_to_send(), self.is_verified());
+        warn!("{}: attested {}", self.id, self.is_attested());
         self.check_attestation_timeouts(&now);
+        if !self.is_attested() {
+            warn!(
+                "{}: read_in_user: Connection not attested, discarding data",
+                self.id
+            );
+            return Err(IdscpConnectionError::NotReady);
+        }
         self.check_resend_timeout(&now);
         if !self.is_ready_to_send() {
+            warn!(
+                "{}: read_in_user: Connection attested, but not ready to send, discarding data",
+                self.id
+            );
             return Err(IdscpConnectionError::NotReady);
         }
 
+        trace!("{}: read_in_user: Parsing {} byte data", self.id, n);
         self.process_event(FsmEvent::FromUpper(UserEvent::Data(data)));
-        println!("sending> successful");
         Ok(n)
     }
 
-    /// Returns optional data received from the connected peer
-    pub fn recv(&mut self) -> Option<Bytes> {
-        self.recv_queue.pop()
+    /// Returns optional data received from the out_conn
+    pub fn write_in_user(&mut self) -> Option<Bytes> {
+        trace!(
+            "{}: write_in_user: Returning message: {}",
+            self.id,
+            !self.write_in_user_queue.is_empty()
+        );
+        self.write_in_user_queue.pop()
     }
 
-    pub fn close(&mut self) {
-        // TODO consume self?
-        todo!()
+    /// Reads a message from the verifier
+    pub fn read_ra_verifier_manager(
+        &mut self,
+        msg: RaMessage<RaVerifierType>,
+    ) -> Result<(), IdscpConnectionError> {
+        trace!("{}: read_ra_verifier_manager: Reading message", self.id);
+        self.process_event(FsmEvent::FromRaVerifier(msg));
+        Ok(())
+    }
+
+    pub fn wants_write_ra_verifier_manager(&self) -> bool {
+        !self.write_ra_verifier_queue.is_empty()
+    }
+
+    /// Returns instructions for the verifier manager
+    pub fn write_ra_verifier_manager(&mut self) -> Option<RaManagerEvent<RaVerifierType>> {
+        trace!(
+            "{}: write_ra_verifier_manager: Returning event: {}",
+            self.id,
+            !self.write_ra_verifier_queue.is_empty()
+        );
+        self.write_ra_verifier_queue.pop_front()
+    }
+
+    /// Reads a message from the prover
+    pub fn read_ra_prover_manager(
+        &mut self,
+        msg: RaMessage<RaProverType>,
+    ) -> Result<(), IdscpConnectionError> {
+        trace!("{}: read_ra_prover_manager: Reading message", self.id);
+        self.process_event(FsmEvent::FromRaProver(msg));
+        Ok(())
+    }
+
+    pub fn wants_write_ra_prover_manager(&self) -> bool {
+        !self.write_ra_prover_queue.is_empty()
+    }
+
+    /// Returns instructions for the prover manager
+    pub fn write_ra_prover_manager(&mut self) -> Option<RaManagerEvent<RaProverType>> {
+        trace!(
+            "{}: write_ra_prover_manager: Returning event: {}",
+            self.id,
+            !self.write_ra_prover_queue.is_empty()
+        );
+        self.write_ra_prover_queue.pop_front()
     }
 }
 
@@ -398,6 +525,21 @@ mod tests {
     use bytes::{BufMut, BytesMut};
     use fsm_spec::fsm_tests::TestDaps;
     use lazy_static::lazy_static;
+
+    #[macro_export]
+    macro_rules! test_begin {
+        () => {
+            let _ = env_logger::builder().is_test(true).try_init();
+            println!("Test started.");
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_finalize {
+        () => {
+            println!("Test done.")
+        };
+    }
 
     use super::*;
 
@@ -420,16 +562,27 @@ mod tests {
             verifier_registry: &TEST_RA_VERIFIER_REGISTRY,
             peer_cert: get_test_cert(),
         };
-        pub(crate) static ref TEST_CONFIG: IdscpConfig<'static> = IdscpConfig {
-            resend_timeout: Duration::from_secs(20),
+        pub(crate) static ref TEST_CONFIG_ALICE: IdscpConfig<'static> = IdscpConfig {
+            id: "alice",
+            resend_timeout: Duration::from_secs(1),
+            ra_config: &TEST_RA_CONFIG,
+        };
+        pub(crate) static ref TEST_CONFIG_BOB: IdscpConfig<'static> = IdscpConfig {
+            id: "bob",
+            resend_timeout: Duration::from_secs(1),
             ra_config: &TEST_RA_CONFIG,
         };
     }
 
-    fn read_channel(peer2: &mut IdscpConnection, channel: &mut BytesMut) {
+    pub(crate) struct IdscpConnectionHandle<'a> {
+        connection: IdscpConnection<'a>,
+        out_conn_channel: BytesMut,
+    }
+
+    fn read_channel(peer2: &mut IdscpConnection, in_channel: &mut BytesMut) {
         let mut chunk_start = 0;
-        while chunk_start < channel.len() {
-            match peer2.read(channel.split_to(channel.len())) {
+        while chunk_start < in_channel.len() {
+            match peer2.read_out_conn(in_channel.split_to(in_channel.len())) {
                 Ok(n) => chunk_start += n,
                 Err(e) => {
                     panic!("{:?}", e)
@@ -438,53 +591,86 @@ mod tests {
         }
     }
 
+    fn emulate_ra_manager<T>(event: RaManagerEvent<T>) -> Option<RaMessage<T>> {
+        match event {
+            RaManagerEvent::RunDriver => Some(RaMessage::Ok(Bytes::from(""))),
+            _ => None,
+        }
+    }
+
     fn spawn_peers<'a>(
         daps_driver_1: &'a mut dyn DapsDriver,
         daps_driver_2: &'a mut dyn DapsDriver,
-    ) -> std::io::Result<(IdscpConnection<'a>, IdscpConnection<'a>, BytesMut, BytesMut)> {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut peer1 = IdscpConnection::connect(daps_driver_1, &TEST_CONFIG);
-        let mut peer2 = IdscpConnection::connect(daps_driver_2, &TEST_CONFIG);
+    ) -> std::io::Result<(IdscpConnectionHandle<'a>, IdscpConnectionHandle<'a>)> {
+        let mut connection_1 = IdscpConnection::connect(daps_driver_1, &TEST_CONFIG_ALICE);
+        let mut connection_2 = IdscpConnection::connect(daps_driver_2, &TEST_CONFIG_BOB);
 
         const MTU: usize = 1500; // Maximum Transmission Unit
-        let mut channel1_2 = BytesMut::with_capacity(MTU);
-        let mut channel2_1 = BytesMut::with_capacity(MTU);
+        let mut channel_1_2 = BytesMut::with_capacity(MTU);
+        let mut channel_2_1 = BytesMut::with_capacity(MTU);
 
-        while !peer1.is_ready_to_send() || !peer2.is_ready_to_send() {
-            peer1.check_drivers();
-
-            while peer1.wants_write() {
-                let mut writer = channel1_2.writer();
-                peer1.write(&mut writer).unwrap();
-                channel1_2 = writer.into_inner();
+        while !connection_1.is_ready_to_send() || !connection_2.is_ready_to_send() {
+            while connection_1.wants_write_out_conn() {
+                let mut writer = channel_1_2.writer();
+                connection_1.write_out_conn(&mut writer).unwrap();
+                channel_1_2 = writer.into_inner();
+            }
+            while let Some(event) = connection_1.write_ra_verifier_manager() {
+                if let Some(msg) = emulate_ra_manager(event) {
+                    connection_1.read_ra_verifier_manager(msg).unwrap();
+                }
+            }
+            while let Some(event) = connection_1.write_ra_prover_manager() {
+                if let Some(msg) = emulate_ra_manager(event) {
+                    connection_1.read_ra_prover_manager(msg).unwrap();
+                }
             }
 
-            read_channel(&mut peer2, &mut channel1_2);
-            channel2_1.reserve(MTU);
-            peer2.check_drivers();
+            read_channel(&mut connection_2, &mut channel_1_2);
+            channel_2_1.reserve(MTU);
 
-            while peer2.wants_write() {
-                let mut writer = channel2_1.writer();
-                peer2.write(&mut writer).unwrap();
-                channel2_1 = writer.into_inner();
+            while connection_2.wants_write_out_conn() {
+                let mut writer = channel_2_1.writer();
+                connection_2.write_out_conn(&mut writer).unwrap();
+                channel_2_1 = writer.into_inner();
+            }
+            while let Some(event) = connection_2.write_ra_verifier_manager() {
+                if let Some(msg) = emulate_ra_manager(event) {
+                    connection_2.read_ra_verifier_manager(msg).unwrap();
+                }
+            }
+            while let Some(event) = connection_2.write_ra_prover_manager() {
+                if let Some(msg) = emulate_ra_manager(event) {
+                    connection_2.read_ra_prover_manager(msg).unwrap();
+                }
             }
 
-            read_channel(&mut peer1, &mut channel2_1);
-            channel2_1.reserve(MTU);
+            read_channel(&mut connection_1, &mut channel_2_1);
+            channel_2_1.reserve(MTU);
         }
 
-        Ok((peer1, peer2, channel1_2, channel2_1))
+        Ok((
+            IdscpConnectionHandle {
+                connection: connection_1,
+                out_conn_channel: channel_1_2,
+            },
+            IdscpConnectionHandle {
+                connection: connection_2,
+                out_conn_channel: channel_2_1,
+            },
+        ))
     }
 
     #[test]
     fn establish_connection() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        info!("Starting test establish_connection");
         let mut daps_driver_1 = TestDaps::default();
         let mut daps_driver_2 = TestDaps::default();
-        let (peer1, peer2, channel1_2, _channel2_1) =
-            spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
+        let (peer1, peer2) = spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
 
-        assert!(peer1.is_ready_to_send() && channel1_2.is_empty());
-        assert!(peer2.is_ready_to_send() && channel1_2.is_empty());
+        assert!(peer1.connection.is_ready_to_send() && peer1.out_conn_channel.is_empty());
+        assert!(peer2.connection.is_ready_to_send() && peer2.out_conn_channel.is_empty());
     }
 
     #[test]
@@ -493,39 +679,41 @@ mod tests {
         let mut daps_driver_2 = TestDaps::default();
 
         // spawn and connect peers
-        let (mut peer1, mut peer2, mut channel1_2, mut channel2_1) =
-            spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
+        let (mut peer1, mut peer2) = spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
 
         const MSG: &[u8; 11] = b"hello world";
 
         // send message from peer1 to peer2
-        let n = peer1.send(Bytes::from(MSG.as_slice())).unwrap();
-        assert!(n == 11 && peer1.wants_write());
+        let n = peer1
+            .connection
+            .read_in_user(Bytes::from(MSG.as_slice()))
+            .unwrap();
+        assert!(n == 11 && peer1.connection.wants_write_out_conn());
         let mut n = 0;
-        while peer1.wants_write() {
-            let mut writer = channel1_2.writer();
-            n += peer1.write(&mut writer).unwrap();
-            channel1_2 = writer.into_inner();
+        while peer1.connection.wants_write_out_conn() {
+            let mut writer = peer1.out_conn_channel.writer();
+            n += peer1.connection.write_out_conn(&mut writer).unwrap();
+            peer1.out_conn_channel = writer.into_inner();
         }
-        assert!(n > 0 && n == channel1_2.len());
+        assert!(n > 0 && n == peer1.out_conn_channel.len());
 
         // peer2 reads from channel
-        read_channel(&mut peer2, &mut channel1_2);
+        read_channel(&mut peer2.connection, &mut peer1.out_conn_channel);
 
         // receive msg and compare from peer2
-        let recv_msg = peer2.recv().unwrap();
+        let recv_msg = peer2.connection.write_in_user().unwrap();
         assert_eq!(MSG, recv_msg.deref());
 
         // peer2 must reply with an ack
         let mut n = 0;
-        while peer2.wants_write() {
-            let mut writer = channel2_1.writer();
-            n += peer2.write(&mut writer).unwrap();
-            channel2_1 = writer.into_inner();
+        while peer2.connection.wants_write_out_conn() {
+            let mut writer = peer2.out_conn_channel.writer();
+            n += peer2.connection.write_out_conn(&mut writer).unwrap();
+            peer2.out_conn_channel = writer.into_inner();
         }
-        assert!(n > 0 && n == channel2_1.len());
+        assert!(n > 0 && n == peer2.out_conn_channel.len());
 
         // peer2 reads from channel
-        read_channel(&mut peer1, &mut channel2_1);
+        read_channel(&mut peer1.connection, &mut peer2.out_conn_channel);
     }
 }
