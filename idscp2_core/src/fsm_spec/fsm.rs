@@ -404,10 +404,11 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 TimeoutState::Active,                         // Dat timeout
                 TimeoutState::Inactive,                       // Ra timeout
                 _,                                            // Resend timeout
-                FsmEvent::FromRaVerifier(RaMessage::Ok(msg)), // TODO: adapt specification to make clear that Verifier signals success?
+                FsmEvent::FromRaVerifier(RaMessage::Ok(msg)),
             ) => {
                 self.verifier = RaState::Done;
                 let msg = idscp_message_factory::create_idscp_ra_verifier(msg);
+                // let msg = idscp_message_factory::create_idscp_ra_complete(msg);
                 let send_action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
                 let ra_timeout_action = FsmAction::SetRaTimeout(self.config.ra_config.ra_timeout);
                 self.ra_timeout = TimeoutState::Active; // TODO: make it one operation with SetRaTimeout
@@ -449,10 +450,29 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 FsmEvent::FromRaProver(RaMessage::Ok(_msg)), // TODO what is msg
             ) => {
                 self.prover = RaState::Done;
-                // let msg = idscp_message_factory::create_idscp_ra_prover(msg);
-                // let action = FsmAction::SecureChannelAction(SecureChannelAction::Message(msg));
-                // Ok(array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => action])
                 ArrayVec::default()
+            }
+
+            // TLA Action "ProverError"
+            // See above
+            (
+                ProtocolState::Running,
+                RaState::Working,                            // Prover state
+                _,                                           // Verifier state
+                _,                                           // DAT is valid?
+                _,                                           // Dat timeout
+                _,                                           // Ra timeout
+                _,                                           // Resend timeout
+                FsmEvent::FromRaProver(RaMessage::Failed()),
+            ) => {
+                let send_action = FsmAction::SecureChannelAction(SecureChannelAction::Message(
+                    idscp_message_factory::create_idscp_close(
+                        IdscpClose_CloseCause::RA_VERIFIER_FAILED,
+                        "",
+                    ),
+                ));
+                self.cleanup();
+                array_vec![[FsmAction; Fsm::EVENT_VEC_LEN] => send_action]
             }
 
             // TLA Action DatExpired
@@ -598,7 +618,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             // TLA Action ReceiveData
             (
                 ProtocolState::Running,
-                RaState::Done,        // Prover state
+                _,                    // Prover state
                 RaState::Done,        // Verifier state
                 true,                 // DAT is valid?
                 TimeoutState::Active, // Dat timeout

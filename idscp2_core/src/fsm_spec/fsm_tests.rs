@@ -8,6 +8,7 @@ use crate::{
 };
 use bytes::Bytes;
 use std::{marker::PhantomData, time::Duration, vec};
+use std::panic::AssertUnwindSafe;
 
 use super::fsm::*;
 
@@ -156,6 +157,24 @@ fn normal_sequence() {
     ));
     assert!(matches!(&actions[1], FsmAction::SetRaTimeout(_)));
 
+    // TLA Action ReceiveData (before ProverSuccess)
+    let msg = idscp_message_factory::create_idscp_data(Bytes::from("foo bar"), true);
+    let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+        msg.message.unwrap(),
+    )));
+    assert_eq!(actions.len(), 2);
+    assert!(matches!(&actions[0], FsmAction::NotifyUserData(_)));
+    let msg = match &actions[1] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+    match msg.message.as_ref().unwrap() {
+        IdscpMessage_oneof_message::idscpAck(idscp_ack) => {
+            assert_eq!(idscp_ack.alternating_bit, true)
+        }
+        _ => panic!("expected IdscpAck"),
+    }
+
     // Action ProverSuccess (which is only implicitly defined in TLA Spec)
     let actions = fsm.process_event(FsmEvent::FromRaProver(RaMessage::Ok(Bytes::from(
         "attestation successful",
@@ -187,7 +206,7 @@ fn normal_sequence() {
     }
     assert!(matches!(&actions[1], FsmAction::SetResendDataTimeout(_)));
 
-    // TLA Action ReceiveData
+    // TLA Action ReceiveData (after ProverSuccess)
     let msg = idscp_message_factory::create_idscp_data(Bytes::from("foo bar"), true);
     let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
         msg.message.unwrap(),
@@ -327,6 +346,72 @@ fn normal_sequence() {
         msg.clone().message.unwrap(),
         IdscpMessage_oneof_message::idscpClose(_)
     ));
+}
+
+#[test]
+fn receive_data_before_prover_ok_error_sequence() {
+    let mut daps_driver = TestDaps::default();
+    let ra_config = AttestationConfig {
+        supported_provers: vec!["TestRatProver"],
+        expected_verifiers: vec!["TestRatProver"],
+        prover_registry: &Default::default(),
+        ra_timeout: Duration::from_secs(30),
+        verifier_registry: &Default::default(),
+        peer_cert: get_test_cert(),
+    };
+    let config = IdscpConfig {
+        id: "",
+        ra_config: &ra_config,
+        resend_timeout: Duration::from_secs(5),
+    };
+    let mut fsm = Fsm::new(&mut daps_driver, &config);
+
+    // TLA Action Start
+    let actions = fsm.process_event(FsmEvent::FromUpper(UserEvent::StartHandshake));
+    assert_eq!(actions.len(), 1);
+    let hello_msg = match &actions[0] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+
+    // TLA Action ReceiveHello
+    let idscp_hello = hello_msg.clone().message.unwrap();
+    let actions = fsm.process_event(FsmEvent::FromSecureChannel(SecureChannelEvent::Message(
+        idscp_hello,
+    )));
+    assert_eq!(actions.len(), 3);
+    assert!(matches!(&actions[0], FsmAction::SetDatTimeout(_)));
+    assert!(matches!(
+        &actions[1],
+        FsmAction::StartProver("TestRatProver")
+    ));
+    assert!(matches!(
+        &actions[2],
+        FsmAction::StartVerifier("TestRatProver")
+    ));
+
+    // TLA Action Verifier Success
+    let actions = fsm.process_event(FsmEvent::FromRaVerifier(RaMessage::Ok(Bytes::from(
+        "attestation successful",
+    ))));
+    assert_eq!(actions.len(), 2);
+    let msg = match &actions[0] {
+        FsmAction::SecureChannelAction(SecureChannelAction::Message(msg)) => msg,
+        _ => panic!("expected Secure Channel message"),
+    };
+    assert!(matches!(
+        msg.clone().message.unwrap(),
+        IdscpMessage_oneof_message::idscpRaVerifier(_)
+    ));
+    assert!(matches!(&actions[1], FsmAction::SetRaTimeout(_)));
+
+    // TLA Action SendData
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        fsm.process_event(FsmEvent::FromUpper(UserEvent::Data(Bytes::from(
+        "hello world!",
+        ))))
+    }));
+    assert!(result.is_err())
 }
 
 #[test]

@@ -663,22 +663,21 @@ mod tests {
 
     #[test]
     fn establish_connection() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        info!("Starting test establish_connection");
+        test_begin!();
         let mut daps_driver_1 = TestDaps::default();
         let mut daps_driver_2 = TestDaps::default();
         let (peer1, peer2) = spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
 
         assert!(peer1.connection.is_ready_to_send() && peer1.out_conn_channel.is_empty());
         assert!(peer2.connection.is_ready_to_send() && peer2.out_conn_channel.is_empty());
+        test_finalize!();
     }
 
     #[test]
     fn transmit_data() {
+        test_begin!();
         let mut daps_driver_1 = TestDaps::default();
         let mut daps_driver_2 = TestDaps::default();
-
-        // spawn and connect peers
         let (mut peer1, mut peer2) = spawn_peers(&mut daps_driver_1, &mut daps_driver_2).unwrap();
 
         const MSG: &[u8; 11] = b"hello world";
@@ -715,5 +714,7 @@ mod tests {
 
         // peer2 reads from channel
         read_channel(&mut peer1.connection, &mut peer2.out_conn_channel);
+
+        test_finalize!();
     }
 }
