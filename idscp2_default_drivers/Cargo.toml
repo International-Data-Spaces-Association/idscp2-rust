@@ -10,10 +10,6 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rust_tpm_verifier = { git = "ssh://git@gitlab.cc-asp.fraunhofer.de/idscp2.0/rust_tpm_verifier.git", version = "0.1.0", default-features = false, features = ["attest", "verify"],  optional = true }
+#idscp2_core = { path = "../idscp2_core" }
 #rustls = {version = "0.19.0", features = ["dangerous_configuration"]}
 #webpki = "0.21.4"
-
-[features]
-default = []
-ra_tpm = ["dep:rust_tpm_verifier"]
