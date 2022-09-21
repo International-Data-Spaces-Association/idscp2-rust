@@ -12,17 +12,18 @@ use protobuf::{CodedOutputStream, Message};
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
-use crate::driver::ra_driver::{RaManager, RaManagerEvent};
+use crate::driver::ra_driver::{RaManager, RaManagerEvent, RaMessage, RaProverType, RaVerifierType};
 use crate::messages::idscpv2_messages::IdscpMessage_oneof_message;
 use crate::UserEvent::RequestReattestation;
 use chunkvec::ChunkVecBuffer;
 use fsm_spec::fsm::*;
 use messages::{idscp_message_factory as msg_factory, idscpv2_messages::IdscpMessage};
 use thiserror::Error;
+use openssl::x509::X509;
 
 pub mod api;
 mod chunkvec;
-mod driver;
+pub mod driver;
 mod fsm_spec;
 mod messages;
 pub mod tokio_idscp_connection;
@@ -36,6 +37,9 @@ const LENGTH_PREFIX_SIZE: usize = std::mem::size_of::<LengthPrefix>();
 ///
 /// This number impacts internal buffer sizes and restricts the maximum data message size.
 const MAX_FRAME_SIZE: usize = 4096;
+
+/// A certificate TODO
+pub type Certificate = X509;
 
 #[derive(Error, Debug)]
 pub enum IdscpConnectionError {
@@ -519,9 +523,9 @@ mod tests {
 
     use crate::api::idscp2_config::AttestationConfig;
     use crate::driver::ra_driver::tests::{
-        get_test_cert, TestProver, TestVerifier, TEST_PROVER_ID, TEST_VERIFIER_ID,
+        get_test_cert, TEST_PROVER_ID, TEST_VERIFIER_ID, TestProver, TestVerifier,
     };
-    use crate::driver::ra_driver::RaRegistry;
+    use crate::driver::ra_driver::{RaProverType, RaRegistry, RaVerifierType};
     use bytes::{BufMut, BytesMut};
     use fsm_spec::fsm_tests::TestDaps;
     use lazy_static::lazy_static;

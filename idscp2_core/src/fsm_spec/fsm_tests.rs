@@ -1,11 +1,7 @@
 use crate::driver::ra_driver::tests::get_test_cert;
 use crate::messages::idscpv2_messages::IdscpClose_CloseCause;
 use crate::msg_factory::create_idscp_hello;
-use crate::{
-    api::idscp2_config::{AttestationConfig, IdscpConfig},
-    driver::daps_driver::DapsDriver,
-    messages::{idscp_message_factory, idscpv2_messages::IdscpMessage_oneof_message},
-};
+use crate::{api::idscp2_config::{AttestationConfig, IdscpConfig}, driver::daps_driver::DapsDriver, messages::{idscp_message_factory, idscpv2_messages::IdscpMessage_oneof_message}, RaMessage};
 use bytes::Bytes;
 use std::{marker::PhantomData, time::Duration, vec};
 use std::panic::AssertUnwindSafe;

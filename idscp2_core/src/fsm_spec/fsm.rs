@@ -5,11 +5,12 @@ use tinyvec::{array_vec, ArrayVec};
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
-use crate::driver::ra_driver::DriverId;
+use crate::driver::ra_driver::{DriverId, RaMessage};
 use crate::messages::idscp_message_factory;
 use crate::messages::idscpv2_messages::{
     IdscpClose_CloseCause, IdscpData, IdscpMessage, IdscpMessage_oneof_message,
 };
+use crate::{RaProverType, RaVerifierType};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProtocolState {
@@ -41,13 +42,6 @@ impl Default for FsmAction {
     fn default() -> Self {
         Self::None
     }
-}
-
-#[derive(Debug)]
-pub enum RaMessage<RaType> {
-    Ok(Bytes),
-    Failed(),
-    RawData(Bytes, PhantomData<RaType>),
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -99,14 +93,6 @@ pub(crate) enum UserEvent {
     RequestReattestation(&'static str), //includes cause
     Data(Bytes),                        // ref-counted
 }
-
-trait RaType {}
-#[derive(Debug, PartialEq)]
-pub struct RaProverType {}
-impl RaType for RaProverType {}
-#[derive(Debug, PartialEq)]
-pub struct RaVerifierType {}
-impl RaType for RaVerifierType {}
 
 #[derive(Debug, PartialEq)]
 enum RaState<RaType> {

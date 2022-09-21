@@ -214,7 +214,7 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         reader: &mut R,
         writer: &mut W,
     ) -> std::io::Result<()> {
-        while !connection.is_ready_to_send() {
+        loop {
             // check outgoing channels
             while connection.wants_write_out_conn() {
                 Self::write(connection, writer).await?;
@@ -292,21 +292,78 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         Ok(())
     }
 
-    #[cfg(test)]
-    async fn idle(&mut self) -> std::io::Result<()> {
-        let (mut reader, mut writer) = self.tcp_stream.split();
-        Self::recover(
-            &mut self.connection,
-            &mut self.ra_verifier_manager,
-            &mut self.ra_prover_manager,
-            &mut reader,
-            &mut writer,
+    #[inline]
+    async fn do_send_to<'a, R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+        connection: &mut IdscpConnection<'a>,
+        ra_verifier_manager: &mut RaManager<'a, RaVerifierType>,
+        ra_prover_manager: &mut RaManager<'a, RaProverType>,
+        reader: &mut R,
+        writer: &mut W,
+        data: Bytes,
+    ) -> std::io::Result<usize> {
+        let res = Self::do_try_send_to(
+            connection,
+            ra_verifier_manager,
+            ra_prover_manager,
+            reader,
+            writer,
+            data,
         )
-        .await
+        .await?;
+        trace!("{}: send: Recovering", connection.id,);
+        Self::recover(
+            connection,
+            ra_verifier_manager,
+            ra_prover_manager,
+            reader,
+            writer,
+        )
+        .await?;
+        Ok(res)
+    }
+
+    /// Sends `data` to the connected peer and awaits acknowledgement.
+    /// If `timeout` is supplied, the operation may terminate during operation if the timeout elapses.
+    /// In this case, there is no guarantee that the data has been delivered, but the connection
+    /// should be able to recover.
+    pub async fn send(&mut self, data: Bytes, timeout: Option<Duration>) -> std::io::Result<usize> {
+        let (mut reader, mut writer) = self.tcp_stream.split();
+        timed_out!(
+            timeout,
+            Self::do_send_to(
+                &mut self.connection,
+                &mut self.ra_verifier_manager,
+                &mut self.ra_prover_manager,
+                &mut reader,
+                &mut writer,
+                data
+            )
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn send_to<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        data: Bytes,
+        timeout: Option<Duration>,
+    ) -> std::io::Result<usize> {
+        timed_out!(
+            timeout,
+            Self::do_send_to(
+                &mut self.connection,
+                &mut self.ra_verifier_manager,
+                &mut self.ra_prover_manager,
+                reader,
+                writer,
+                data
+            )
+        )
     }
 
     #[inline]
-    async fn do_send_to<'a, R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+    async fn do_try_send_to<'a, R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         connection: &mut IdscpConnection<'a>,
         ra_verifier_manager: &mut RaManager<'a, RaVerifierType>,
         ra_prover_manager: &mut RaManager<'a, RaProverType>,
@@ -347,11 +404,19 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         }
     }
 
-    pub async fn send(&mut self, data: Bytes, timeout: Option<Duration>) -> std::io::Result<usize> {
+    /// Sends `data` to the connected peer without awaiting acknowledgement.
+    /// If `timeout` is supplied, the operation may terminate during operation if the timeout elapses.
+    /// In this case, there is no guarantee that the data has been delivered, but the connection
+    /// should be able to recover.
+    pub async fn try_send(
+        &mut self,
+        data: Bytes,
+        timeout: Option<Duration>,
+    ) -> std::io::Result<usize> {
         let (mut reader, mut writer) = self.tcp_stream.split();
         timed_out!(
             timeout,
-            Self::do_send_to(
+            Self::do_try_send_to(
                 &mut self.connection,
                 &mut self.ra_verifier_manager,
                 &mut self.ra_prover_manager,
@@ -363,7 +428,7 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
     }
 
     #[allow(dead_code)]
-    async fn send_to<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+    pub(crate) async fn try_send_to<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
@@ -372,7 +437,7 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
     ) -> std::io::Result<usize> {
         timed_out!(
             timeout,
-            Self::do_send_to(
+            Self::do_try_send_to(
                 &mut self.connection,
                 &mut self.ra_verifier_manager,
                 &mut self.ra_prover_manager,
@@ -383,6 +448,7 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         )
     }
 
+    /*
     #[inline]
     async fn do_try_send_to<'a, W: AsyncWriteExt + Unpin>(
         connection: &mut IdscpConnection<'a>,
@@ -406,13 +472,14 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
         Self::do_try_send_to(&mut self.connection, &mut self.tcp_stream, data).await
     }
 
-    pub async fn try_send_to<W: AsyncWriteExt + Unpin>(
+    pub(crate) async fn try_send_to<W: AsyncWriteExt + Unpin>(
         &mut self,
         writer: &mut W,
         data: Bytes,
     ) -> std::io::Result<usize> {
         Self::do_try_send_to(&mut self.connection, writer, data).await
     }
+     */
 
     async fn do_recv_from<'a, R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         connection: &mut IdscpConnection<'a>,
@@ -433,6 +500,17 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                     "{}: recv: No cached messages, entering slow path.",
                     connection.id
                 );
+                let mut res: Option<Bytes> = None;
+
+                /*
+                The loop is structured that it first checks all outgoing channels of the
+                IdscpConnection for any pending messages that need to be delivered, then reading on
+                the underlying socket using Self::read.
+                Any read messages are cached in the `res` variable.
+                The loop will wrap at least once, such that the outgoing channels can again be
+                checked for any acknowledgements resulting of the read operation before attempting
+                to return some cached message.
+                 */
                 loop {
                     // check outgoing channels
                     while connection.wants_write_out_conn() {
@@ -443,6 +521,11 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                     }
                     while let Some(event) = connection.write_ra_prover_manager() {
                         ra_prover_manager.process_event(event).unwrap();
+                    }
+
+                    // loop exit condition only triggered after second loop iteration
+                    if let Some(msg) = res {
+                        return Ok(msg);
                     }
 
                     // check incoming channels
@@ -456,12 +539,12 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                                 msg = msg_from_ra_prover =>  {
                                     connection.read_ra_prover_manager(msg).unwrap();
                                 }
-                                res = Self::read(connection, reader) => {
-                                    if res?? == 0 { // TODO evaluate if fix is correct
-                                        return Ok(Bytes::new());
+                                read_res = Self::read(connection, reader) => {
+                                    if read_res?? == 0 { // TODO evaluate if fix is correct
+                                        res = Some(Bytes::new());
                                     }
                                     if let Some(msg) = connection.write_in_user() {
-                                        return Ok(msg);
+                                        res = Some(msg);
                                     }
                                 }
                             };
@@ -471,12 +554,12 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                                 msg = msg_from_ra_verifier =>  {
                                     connection.read_ra_verifier_manager(msg).unwrap();
                                 }
-                                res = Self::read(connection, reader) => {
-                                    if res?? == 0 { // TODO evaluate if fix is correct
-                                        return Ok(Bytes::new());
+                                read_res = Self::read(connection, reader) => {
+                                    if read_res?? == 0 { // TODO evaluate if fix is correct
+                                        res = Some(Bytes::new());
                                     }
                                     if let Some(msg) = connection.write_in_user() {
-                                        return Ok(msg);
+                                        res = Some(msg);
                                     }
                                 }
                             };
@@ -486,33 +569,37 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
                                 msg = msg_from_ra_prover =>  {
                                     connection.read_ra_prover_manager(msg).unwrap();
                                 }
-                                res = Self::read(connection, reader) => {
-                                    if res?? == 0 { // TODO evaluate if fix is correct
-                                        return Ok(Bytes::new());
+                                read_res = Self::read(connection, reader) => {
+                                    if read_res?? == 0 { // TODO evaluate if fix is correct
+                                        res = Some(Bytes::new());
                                     }
                                     if let Some(msg) = connection.write_in_user() {
-                                        return Ok(msg);
+                                        res = Some(msg);
                                     }
                                 }
                             };
                         }
                         (None, None) => {
-                            let res = Self::read(connection, reader).await;
-                            if res?? == 0 {
+                            let read_res = Self::read(connection, reader).await;
+                            if read_res?? == 0 {
                                 // TODO evaluate if fix is correct
-                                return Ok(Bytes::new());
+                                res = Some(Bytes::new());
                             }
                             if let Some(msg) = connection.write_in_user() {
-                                return Ok(msg);
+                                res = Some(msg);
                             }
                         }
                     }
-                    trace!("Did not return!");
+                    // end of loop
                 }
             }
         }
     }
 
+    /// Receives data from the connected peer and replies with an acknowledgement.
+    /// If `timeout` is supplied, the operation may terminate during operation if the timeout elapses.
+    /// In this case, there is no guarantee that the data has been delivered, but the connection
+    /// should be able to recover.
     pub async fn recv(&mut self, timeout: Option<Duration>) -> std::io::Result<Bytes> {
         let (mut reader, mut writer) = self.tcp_stream.split();
         timed_out!(
@@ -569,7 +656,7 @@ mod tests {
     use std::ops::Deref;
     use std::thread::sleep;
     use std::time::Duration;
-    use tokio_test::{assert_err, assert_ok};
+    use tokio_test::assert_ok;
 
     #[test]
     fn async_establish_connection() {
@@ -579,22 +666,17 @@ mod tests {
             let (connect_result, accept_result) = tokio::join!(
                 async {
                     let mut daps_driver = TestDaps::default();
-                    let mut connection = AsyncIdscpConnection::connect(
+                    let _connection = AsyncIdscpConnection::connect(
                         address,
                         &mut daps_driver,
                         &TEST_CONFIG_ALICE,
                     )
                     .await?;
-                    let data = Bytes::from([1u8, 2, 3, 4].as_slice());
-                    let n = connection.send(data, None).await?;
-                    assert!(n == 4);
                     Ok::<(), std::io::Error>(())
                 },
                 async {
                     let mut daps_driver = TestDaps::default();
-                    let mut connection =
-                        listener.accept(&mut daps_driver, &TEST_CONFIG_BOB).await?;
-                    connection.idle().await?;
+                    let _connection = listener.accept(&mut daps_driver, &TEST_CONFIG_BOB).await?;
                     Ok::<(), std::io::Error>(())
                 }
             );
@@ -623,30 +705,15 @@ mod tests {
                         &TEST_CONFIG_ALICE,
                     )
                     .await?;
-                    tokio::time::sleep_until(
-                        tokio::time::Instant::now() + Duration::from_millis(200),
-                    )
-                    .await;
-                    println!("continue");
                     let n = connection.send(Bytes::from(MSG.as_slice()), None).await?;
                     assert!(n == 4);
                     Ok::<(), std::io::Error>(())
                 },
                 async {
                     let mut daps_driver = TestDaps::default();
-                    let mut connection = listener
-                        .accept(&mut daps_driver, &TEST_CONFIG_BOB)
-                        .await
-                        .unwrap();
-                    // TODO loop workaround
-                    let msg = loop {
-                        let msg = connection.recv(None).await.unwrap();
-                        if !msg.is_empty() {
-                            break msg;
-                        }
-                        sleep(Duration::from_secs(1));
-                        tokio::task::yield_now().await;
-                    };
+                    let mut connection =
+                        listener.accept(&mut daps_driver, &TEST_CONFIG_BOB).await?;
+                    let msg = connection.recv(None).await?;
                     assert_eq!(msg.deref(), MSG);
                     Ok::<(), std::io::Error>(())
                 }
@@ -784,6 +851,7 @@ mod tests {
         test_finalize!();
     }
 
+    /*
     async fn send(
         peer1: &mut AsyncIdscpConnection<'_>,
         transmission_size: usize,
@@ -824,4 +892,5 @@ mod tests {
         assert_err!(res);
         test_finalize!();
     }
+     */
 }

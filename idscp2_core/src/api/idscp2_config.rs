@@ -3,8 +3,6 @@ use crate::{RaProverType, RaVerifierType};
 use openssl::x509::X509;
 use std::time::Duration;
 
-pub(crate) type Certificate = X509;
-
 pub struct IdscpConfig<'a> {
     /// for logging purposes only
     pub id: &'static str,

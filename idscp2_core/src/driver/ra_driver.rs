@@ -1,5 +1,4 @@
-use crate::api::idscp2_config::Certificate;
-use crate::RaMessage;
+use crate::Certificate;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::hash_map::Entry;
@@ -7,6 +6,21 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use thiserror::Error;
+
+trait RaType {}
+#[derive(Debug, PartialEq)]
+pub struct RaProverType {}
+impl RaType for RaProverType {}
+#[derive(Debug, PartialEq)]
+pub struct RaVerifierType {}
+impl RaType for RaVerifierType {}
+
+#[derive(Debug)]
+pub enum RaMessage<RaType> {
+    Ok(Bytes),
+    Failed(),
+    RawData(Bytes, PhantomData<RaType>),
+}
 
 /// A `RaDriverInstance` represents the exclusive interface of an `IdscpConnection` to a driver. It
 /// is owned by a connection and only exists for the lifetime of the connection. Therefore, it
@@ -185,7 +199,8 @@ impl<'reg, RaType> RaManager<'reg, RaType> {
         >,
     > {
         self.active_instance
-            .as_mut().map(|instance| instance.recv_msg())
+            .as_mut()
+            .map(|instance| instance.recv_msg())
     }
 
     pub fn send_msg(&mut self, msg: Bytes) {
@@ -203,9 +218,8 @@ impl<RaType> Default for RaRegistry<RaType> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::api::idscp2_config::Certificate;
-    use crate::driver::ra_driver::{DriverId, RaDriver, RaDriverInstance, RaMessage};
-    use crate::{RaProverType, RaVerifierType};
+    use crate::Certificate;
+    use crate::driver::ra_driver::{DriverId, RaDriver, RaDriverInstance, RaMessage, RaProverType, RaVerifierType};
     use async_trait::async_trait;
     use bytes::Bytes;
     use std::fs;
@@ -460,11 +474,13 @@ pub(crate) mod tests {
                                 verifier_instance.send_msg(msg);
                             }
                             RaMessage::Ok(_) => {
+                                // panic!("Prover should never return");
                                 loop_idle = false;
                                 println!("Prover Ok");
                                 prover_ok = true;
                             }
                             RaMessage::Failed() => {
+                                // panic!("Prover should never return");
                                 panic!("Test Prover Failed");
                             }
                         }
