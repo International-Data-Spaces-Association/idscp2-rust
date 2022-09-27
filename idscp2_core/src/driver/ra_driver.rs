@@ -416,6 +416,79 @@ pub(crate) mod tests {
         }
     }
 
+    /// TestProver implementation that never reports being done to the FSM
+    ///
+    /// Used for forcefully creating partially attested states
+    pub(crate) struct TestProverNeverDone {}
+
+    impl RaDriver<RaProverType> for TestProverNeverDone {
+        fn new_instance(
+            &self,
+            _cert: &Certificate,
+        ) -> Box<(dyn RaDriverInstance<RaProverType> + 'static)> {
+            Box::new(TestProverNeverDoneInstance {
+                state: TestProverState::Idle,
+            })
+        }
+
+        fn get_id(&self) -> DriverId {
+            TEST_VERIFIER_ID
+        }
+    }
+
+    pub(crate) struct TestProverNeverDoneInstance {
+        state: TestProverState,
+    }
+
+    #[async_trait]
+    impl RaDriverInstance<RaProverType> for TestProverNeverDoneInstance {
+        fn get_id(&self) -> DriverId {
+            TEST_VERIFIER_ID
+        }
+
+        fn begin_attestation(&mut self) {
+            self.state = TestProverState::WaitingForBegin;
+        }
+
+        fn send_msg(&mut self, msg: Bytes) {
+            match &self.state {
+                TestProverState::WaitingForBegin => {
+                    self.state =
+                        TestProverState::Reply(Bytes::from(if msg == *"test_begin_attest" {
+                            "test_report"
+                        } else {
+                            "test_failure"
+                        }));
+                }
+                TestProverState::WaitingForResponse => {
+                    self.state = if msg == *"test_ok" {
+                        TestProverState::Ok
+                    } else {
+                        TestProverState::Failed
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        async fn recv_msg(&mut self) -> RaMessage<RaProverType> {
+            loop {
+                match &self.state {
+                    TestProverState::Reply(msg) => {
+                        let msg = msg.clone();
+                        self.state = TestProverState::WaitingForResponse;
+                        return RaMessage::RawData(msg, PhantomData);
+                    }
+                    // no Ok/Failed state match on purpose
+                    _ => {
+                        // println!("b");
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn get_test_cert() -> Certificate {
         let local_client_cert = fs::read(PathBuf::from(format!(
             "{}/../test_pki/resources/openssl/out/{}",

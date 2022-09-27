@@ -647,7 +647,7 @@ impl<'fsm> AsyncIdscpConnection<'fsm> {
 mod tests {
     use super::*;
     use crate::fsm_spec::fsm_tests::TestDaps;
-    use crate::tests::{TEST_CONFIG_ALICE, TEST_CONFIG_BOB};
+    use crate::tests::{TEST_CONFIG_ALICE, TEST_CONFIG_BOB, TEST_PROVER_NEVER_DONE_CONFIG_BOB};
     use crate::util::test::spawn_listener;
     use crate::{test_begin, test_finalize};
     use bytes::BytesMut;
@@ -721,6 +721,44 @@ mod tests {
 
             assert!(connect_result.is_ok());
             assert!(accept_result.is_ok());
+        });
+        test_finalize!();
+    }
+
+    #[test]
+    fn async_transmit_data_no_full_attestation() {
+        test_begin!();
+        const MSG: &[u8; 4] = &[1, 2, 3, 4];
+
+        tokio_test::block_on(async {
+            let (listener, _guard, address) = spawn_listener().await;
+            tokio::select!(
+                connect_result = async {
+                    let mut daps_driver = TestDaps::default();
+                    let mut connection = AsyncIdscpConnection::connect(
+                        address,
+                        &mut daps_driver,
+                        &TEST_CONFIG_ALICE,
+                    )
+                    .await?;
+                    let n = connection.send(Bytes::from(MSG.as_slice()), None).await?;
+                    assert!(n == 4);
+                    Ok::<(), std::io::Error>(())
+                } => {
+                    assert!(connect_result.is_ok());
+                },
+                _ = async {
+                    let mut daps_driver = TestDaps::default();
+                    let mut connection =
+                        listener.accept(&mut daps_driver, &TEST_PROVER_NEVER_DONE_CONFIG_BOB).await?;
+                    println!("accepted");
+                    let msg = connection.recv(None).await?;
+                    assert_eq!(msg.deref(), MSG);
+                    Ok::<(), std::io::Error>(())
+                } => {
+                    panic!("Bob should not terminate!");
+                },
+            );
         });
         test_finalize!();
     }

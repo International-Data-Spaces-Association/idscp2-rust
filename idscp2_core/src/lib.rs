@@ -116,10 +116,24 @@ impl<'fsm> IdscpConnection<'fsm> {
         self.fsm.is_open()
     }
 
-    /// Returns `true`, if the connection is connected and attestation has been completed and not
-    /// timed out.
-    pub fn is_attested(&self) -> bool {
-        self.fsm.is_attested()
+    // TODO naming partially <> fully
+
+    /// Returns `true`, if the connection is connected and attestation of the connected peer has
+    /// been completed and not timed out.
+    ///
+    /// If true, incoming data from the connected peer can be trusted, but no data can be sent due
+    /// to the missing attestation of this peer to the connected peer.
+    pub fn is_partially_attested(&self) -> bool {
+        self.fsm.is_partially_attested()
+    }
+
+    /// Returns `true`, if the connection is connected and attestation of both peers to each other
+    /// has been completed and not timed out.
+    ///
+    /// If true, data can be both received and queued for sending. Sending may not succeed due to
+    /// the connection being blocked. See [IdscpConnection::is_ready_to_send](IdscpConnection::is_ready_to_send).
+    pub fn is_fully_attested(&self) -> bool {
+        self.fsm.is_fully_attested()
     }
 
     /// Returns `true`, if the connection is connected, attested, and available for sending data.
@@ -339,11 +353,9 @@ impl<'fsm> IdscpConnection<'fsm> {
                     // check timeouts and continue only when ready
                     let now = Instant::now();
                     self.check_attestation_timeouts(&now);
-                    // FIXME temporary fix: check if prover was successful from previous message
-                    // TODO self.check_drivers();
-                    if !self.is_attested() {
+                    if !self.is_partially_attested() {
                         warn!(
-                            "{}: read_out_conn: Connection not attested, discarding data",
+                            "{}: read_out_conn: Connection not partially attested, discarding data",
                             self.id
                         );
                         return Err(IdscpConnectionError::NotReady);
@@ -433,9 +445,9 @@ impl<'fsm> IdscpConnection<'fsm> {
 
         // check timeouts and continue only when ready
         let now = Instant::now();
-        warn!("{}: attested {}", self.id, self.is_attested());
+        warn!("{}: attested {}", self.id, self.is_fully_attested());
         self.check_attestation_timeouts(&now);
-        if !self.is_attested() {
+        if !self.is_fully_attested() {
             warn!(
                 "{}: read_in_user: Connection not attested, discarding data",
                 self.id
@@ -522,9 +534,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::api::idscp2_config::AttestationConfig;
-    use crate::driver::ra_driver::tests::{
-        get_test_cert, TEST_PROVER_ID, TEST_VERIFIER_ID, TestProver, TestVerifier,
-    };
+    use crate::driver::ra_driver::tests::{get_test_cert, TEST_PROVER_ID, TEST_VERIFIER_ID, TestProver, TestProverNeverDone, TestVerifier};
     use crate::driver::ra_driver::{RaProverType, RaRegistry, RaVerifierType};
     use bytes::{BufMut, BytesMut};
     use fsm_spec::fsm_tests::TestDaps;
@@ -548,20 +558,33 @@ mod tests {
     use super::*;
 
     lazy_static! {
+        pub(crate) static ref TEST_RA_VERIFIER_REGISTRY: RaRegistry<RaVerifierType> = {
+            let mut registry = RaRegistry::new();
+            let _ = registry.register_driver(Arc::new(TestVerifier {}));
+            registry
+        };
         pub(crate) static ref TEST_RA_PROVER_REGISTRY: RaRegistry<RaProverType> = {
             let mut registry = RaRegistry::new();
             let _ = registry.register_driver(Arc::new(TestProver {}));
             registry
         };
-        pub(crate) static ref TEST_RA_VERIFIER_REGISTRY: RaRegistry<RaVerifierType> = {
+        pub(crate) static ref TEST_RA_PROVER_NEVER_DONE_REGISTRY: RaRegistry<RaProverType> = {
             let mut registry = RaRegistry::new();
-            let _ = registry.register_driver(Arc::new(TestVerifier {}));
+            let _ = registry.register_driver(Arc::new(TestProverNeverDone {}));
             registry
         };
         pub(crate) static ref TEST_RA_CONFIG: AttestationConfig<'static> = AttestationConfig {
             supported_provers: vec![TEST_PROVER_ID],
             expected_verifiers: vec![TEST_VERIFIER_ID],
             prover_registry: &TEST_RA_PROVER_REGISTRY,
+            ra_timeout: Duration::from_secs(20),
+            verifier_registry: &TEST_RA_VERIFIER_REGISTRY,
+            peer_cert: get_test_cert(),
+        };
+        pub(crate) static ref TEST_RA_PROVER_NEVER_DONE_CONFIG: AttestationConfig<'static> = AttestationConfig {
+            supported_provers: vec![TEST_PROVER_ID],
+            expected_verifiers: vec![TEST_VERIFIER_ID],
+            prover_registry: &TEST_RA_PROVER_NEVER_DONE_REGISTRY,
             ra_timeout: Duration::from_secs(20),
             verifier_registry: &TEST_RA_VERIFIER_REGISTRY,
             peer_cert: get_test_cert(),
@@ -575,6 +598,11 @@ mod tests {
             id: "bob",
             resend_timeout: Duration::from_secs(1),
             ra_config: &TEST_RA_CONFIG,
+        };
+        pub(crate) static ref TEST_PROVER_NEVER_DONE_CONFIG_BOB: IdscpConfig<'static> = IdscpConfig {
+            id: "bob",
+            resend_timeout: Duration::from_secs(1),
+            ra_config: &TEST_RA_PROVER_NEVER_DONE_CONFIG,
         };
     }
 

@@ -790,19 +790,24 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
         self.state == ProtocolState::Running
     }
 
-    /// Returns `true` if the connection is verified and can be used to exchange data.
-    pub(crate) fn is_attested(&self) -> bool {
+    /// Returns `true` if the connection is verified and can be used to receive data.
+    pub(crate) fn is_partially_attested(&self) -> bool {
         self.is_open()
             && self.dat_timeout == TimeoutState::Active
-            && self.prover == RaState::Done
             && self.verifier == RaState::Done
             && self.daps_driver.is_valid()
+    }
+
+    /// Returns `true` if the connection is verified and can be used to send and receive data.
+    pub(crate) fn is_fully_attested(&self) -> bool {
+        self.is_partially_attested()
+            && self.prover == RaState::Done
     }
 
     /// Returns `true` if data can be sent in the current state.
     /// This is the case, if the connection is verified and all sent data has been acknowledged by the connected peer.
     pub(crate) fn is_ready_to_send(&self) -> bool {
-        self.is_attested() && self.resend_timeout == TimeoutState::Inactive
+        self.is_fully_attested() && self.resend_timeout == TimeoutState::Inactive
     }
 
     // workaround
