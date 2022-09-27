@@ -384,12 +384,12 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             // TLA Action "VerifierSuccess"
             (
                 ProtocolState::Running,
-                _,                                            // Prover state
-                RaState::Working,                             // Verifier state
-                true,                                         // DAT is valid?
-                TimeoutState::Active,                         // Dat timeout
-                TimeoutState::Inactive,                       // Ra timeout
-                _,                                            // Resend timeout
+                _,                      // Prover state
+                RaState::Working,       // Verifier state
+                true,                   // DAT is valid?
+                TimeoutState::Active,   // Dat timeout
+                TimeoutState::Inactive, // Ra timeout
+                _,                      // Resend timeout
                 FsmEvent::FromRaVerifier(RaMessage::Ok(msg)),
             ) => {
                 self.verifier = RaState::Done;
@@ -443,12 +443,12 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
             // See above
             (
                 ProtocolState::Running,
-                RaState::Working,                            // Prover state
-                _,                                           // Verifier state
-                _,                                           // DAT is valid?
-                _,                                           // Dat timeout
-                _,                                           // Ra timeout
-                _,                                           // Resend timeout
+                RaState::Working, // Prover state
+                _,                // Verifier state
+                _,                // DAT is valid?
+                _,                // Dat timeout
+                _,                // Ra timeout
+                _,                // Resend timeout
                 FsmEvent::FromRaProver(RaMessage::Failed()),
             ) => {
                 let send_action = FsmAction::SecureChannelAction(SecureChannelAction::Message(
@@ -800,8 +800,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
 
     /// Returns `true` if the connection is verified and can be used to send and receive data.
     pub(crate) fn is_fully_attested(&self) -> bool {
-        self.is_partially_attested()
-            && self.prover == RaState::Done
+        self.is_partially_attested() && self.prover == RaState::Done
     }
 
     /// Returns `true` if data can be sent in the current state.

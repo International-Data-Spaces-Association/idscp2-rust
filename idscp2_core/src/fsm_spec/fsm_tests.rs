@@ -1,10 +1,14 @@
 use crate::driver::ra_driver::tests::get_test_cert;
 use crate::messages::idscpv2_messages::IdscpClose_CloseCause;
 use crate::msg_factory::create_idscp_hello;
-use crate::{api::idscp2_config::{AttestationConfig, IdscpConfig}, driver::daps_driver::DapsDriver, messages::{idscp_message_factory, idscpv2_messages::IdscpMessage_oneof_message}, RaMessage};
+use crate::{
+    api::idscp2_config::{AttestationConfig, IdscpConfig},
+    driver::daps_driver::DapsDriver,
+    messages::{idscp_message_factory, idscpv2_messages::IdscpMessage_oneof_message},
+    RaMessage,
+};
 use bytes::Bytes;
 use std::{marker::PhantomData, time::Duration, vec};
-use std::panic::AssertUnwindSafe;
 
 use super::fsm::*;
 
@@ -345,7 +349,8 @@ fn normal_sequence() {
 }
 
 #[test]
-fn receive_data_before_prover_ok_error_sequence() {
+#[should_panic]
+fn send_data_before_prover_ok_error_sequence() {
     let mut daps_driver = TestDaps::default();
     let ra_config = AttestationConfig {
         supported_provers: vec!["TestRatProver"],
@@ -402,12 +407,10 @@ fn receive_data_before_prover_ok_error_sequence() {
     assert!(matches!(&actions[1], FsmAction::SetRaTimeout(_)));
 
     // TLA Action SendData
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        fsm.process_event(FsmEvent::FromUpper(UserEvent::Data(Bytes::from(
+    // this should panic
+    fsm.process_event(FsmEvent::FromUpper(UserEvent::Data(Bytes::from(
         "hello world!",
-        ))))
-    }));
-    assert!(result.is_err())
+    ))));
 }
 
 #[test]

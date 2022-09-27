@@ -158,7 +158,7 @@ impl<'reg, RaType> RaManager<'reg, RaType> {
             RaManagerEvent::RawData(msg, _) => {
                 self.send_msg(msg);
                 Ok(())
-            },
+            }
         }
     }
 
@@ -218,8 +218,10 @@ impl<RaType> Default for RaRegistry<RaType> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::driver::ra_driver::{
+        DriverId, RaDriver, RaDriverInstance, RaMessage, RaProverType, RaVerifierType,
+    };
     use crate::Certificate;
-    use crate::driver::ra_driver::{DriverId, RaDriver, RaDriverInstance, RaMessage, RaProverType, RaVerifierType};
     use async_trait::async_trait;
     use bytes::Bytes;
     use std::fs;

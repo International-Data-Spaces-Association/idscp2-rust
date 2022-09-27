@@ -12,14 +12,16 @@ use protobuf::{CodedOutputStream, Message};
 
 use crate::api::idscp2_config::IdscpConfig;
 use crate::driver::daps_driver::DapsDriver;
-use crate::driver::ra_driver::{RaManager, RaManagerEvent, RaMessage, RaProverType, RaVerifierType};
+use crate::driver::ra_driver::{
+    RaManager, RaManagerEvent, RaMessage, RaProverType, RaVerifierType,
+};
 use crate::messages::idscpv2_messages::IdscpMessage_oneof_message;
 use crate::UserEvent::RequestReattestation;
 use chunkvec::ChunkVecBuffer;
 use fsm_spec::fsm::*;
 use messages::{idscp_message_factory as msg_factory, idscpv2_messages::IdscpMessage};
-use thiserror::Error;
 use openssl::x509::X509;
+use thiserror::Error;
 
 pub mod api;
 mod chunkvec;
@@ -534,7 +536,10 @@ mod tests {
     use std::time::Duration;
 
     use crate::api::idscp2_config::AttestationConfig;
-    use crate::driver::ra_driver::tests::{get_test_cert, TEST_PROVER_ID, TEST_VERIFIER_ID, TestProver, TestProverNeverDone, TestVerifier};
+    use crate::driver::ra_driver::tests::{
+        get_test_cert, TestProver, TestProverNeverDone, TestVerifier, TEST_PROVER_ID,
+        TEST_VERIFIER_ID,
+    };
     use crate::driver::ra_driver::{RaProverType, RaRegistry, RaVerifierType};
     use bytes::{BufMut, BytesMut};
     use fsm_spec::fsm_tests::TestDaps;
@@ -581,14 +586,15 @@ mod tests {
             verifier_registry: &TEST_RA_VERIFIER_REGISTRY,
             peer_cert: get_test_cert(),
         };
-        pub(crate) static ref TEST_RA_PROVER_NEVER_DONE_CONFIG: AttestationConfig<'static> = AttestationConfig {
-            supported_provers: vec![TEST_PROVER_ID],
-            expected_verifiers: vec![TEST_VERIFIER_ID],
-            prover_registry: &TEST_RA_PROVER_NEVER_DONE_REGISTRY,
-            ra_timeout: Duration::from_secs(20),
-            verifier_registry: &TEST_RA_VERIFIER_REGISTRY,
-            peer_cert: get_test_cert(),
-        };
+        pub(crate) static ref TEST_RA_PROVER_NEVER_DONE_CONFIG: AttestationConfig<'static> =
+            AttestationConfig {
+                supported_provers: vec![TEST_PROVER_ID],
+                expected_verifiers: vec![TEST_VERIFIER_ID],
+                prover_registry: &TEST_RA_PROVER_NEVER_DONE_REGISTRY,
+                ra_timeout: Duration::from_secs(20),
+                verifier_registry: &TEST_RA_VERIFIER_REGISTRY,
+                peer_cert: get_test_cert(),
+            };
         pub(crate) static ref TEST_CONFIG_ALICE: IdscpConfig<'static> = IdscpConfig {
             id: "alice",
             resend_timeout: Duration::from_secs(1),
@@ -599,11 +605,12 @@ mod tests {
             resend_timeout: Duration::from_secs(1),
             ra_config: &TEST_RA_CONFIG,
         };
-        pub(crate) static ref TEST_PROVER_NEVER_DONE_CONFIG_BOB: IdscpConfig<'static> = IdscpConfig {
-            id: "bob",
-            resend_timeout: Duration::from_secs(1),
-            ra_config: &TEST_RA_PROVER_NEVER_DONE_CONFIG,
-        };
+        pub(crate) static ref TEST_PROVER_NEVER_DONE_CONFIG_BOB: IdscpConfig<'static> =
+            IdscpConfig {
+                id: "bob",
+                resend_timeout: Duration::from_secs(1),
+                ra_config: &TEST_RA_PROVER_NEVER_DONE_CONFIG,
+            };
     }
 
     pub(crate) struct IdscpConnectionHandle<'a> {
