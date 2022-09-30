@@ -8,10 +8,10 @@ use std::sync::Arc;
 use thiserror::Error;
 
 trait RaType {}
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct RaProverType {}
 impl RaType for RaProverType {}
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct RaVerifierType {}
 impl RaType for RaVerifierType {}
 
