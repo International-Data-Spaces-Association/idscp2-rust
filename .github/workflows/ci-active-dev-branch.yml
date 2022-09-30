@@ -1,4 +1,4 @@
-name: Rust
+name: Rust Active Development Branch
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
           - stable
           - nightly
           - beta
-          - 1.56.0 # Minimum supported rust version
+          - 1.60.0 # Minimum supported rust version
     steps:
       - uses: actions/checkout@v2
 
