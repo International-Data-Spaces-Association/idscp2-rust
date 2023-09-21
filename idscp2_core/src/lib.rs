@@ -265,12 +265,12 @@ impl<'fsm> IdscpConnection<'fsm> {
                 FsmAction::ToVerifier(msg) => {
                     trace!("{}: FsmAction ToVerifier", self.id);
                     self.write_ra_verifier_queue
-                        .push_back(RaManagerEvent::RawData(msg, PhantomData::default()));
+                        .push_back(RaManagerEvent::RawData(msg, PhantomData));
                 }
                 FsmAction::ToProver(msg) => {
                     trace!("{}: FsmAction ToProver", self.id);
                     self.write_ra_prover_queue
-                        .push_back(RaManagerEvent::RawData(msg, PhantomData::default()));
+                        .push_back(RaManagerEvent::RawData(msg, PhantomData));
                 }
 
                 FsmAction::None => {
