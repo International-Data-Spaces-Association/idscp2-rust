@@ -25,6 +25,10 @@
 		"mutantdino.resourcemonitor"
 	],
 
+	"mounts": [
+		"source=${localEnv:HOME}/.cargo/registry,target=/home/vscode/.cargo/registry,type=bind,consistency=cached"
+	],
+
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],
 

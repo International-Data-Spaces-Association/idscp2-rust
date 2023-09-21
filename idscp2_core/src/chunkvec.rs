@@ -10,23 +10,25 @@ I did not find sufficient alternative crates, possible candidates i looked at we
  However, the ChunkVecBuffer also is no fixed-size allocation.
 */
 
+use bytes::Buf;
 use std::cmp;
 use std::collections::VecDeque;
 use std::io;
 use std::io::Read;
+use std::ops::Deref;
 
 /// This is a byte buffer that is built from a vector
 /// of byte vectors.  This avoids extra copies when
 /// appending a new byte vector, at the expense of
 /// more complexity when reading out.
 #[allow(dead_code)]
-pub struct ChunkVecBuffer {
-    chunks: VecDeque<Vec<u8>>,
+pub struct ChunkVecBuffer<T> {
+    chunks: VecDeque<T>,
     limit: usize,
 }
 
-impl ChunkVecBuffer {
-    pub fn new() -> ChunkVecBuffer {
+impl<T: Deref<Target = [u8]>> ChunkVecBuffer<T> {
+    pub fn new() -> ChunkVecBuffer<T> {
         ChunkVecBuffer {
             chunks: VecDeque::new(),
             limit: 0,
@@ -51,7 +53,6 @@ impl ChunkVecBuffer {
     }
 
     /// How many bytes we're storing
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         let mut len = 0;
         for ch in &self.chunks {
@@ -73,6 +74,15 @@ impl ChunkVecBuffer {
         }
     }
 
+    /// Take one of the chunks from this object.  This
+    /// function panics if the object `is_empty`.
+    #[inline]
+    pub fn pop(&mut self) -> Option<T> {
+        self.chunks.pop_front()
+    }
+}
+
+impl ChunkVecBuffer<Vec<u8>> {
     /// Append a copy of `bytes`, perhaps a prefix if
     /// we're near the limit.
     #[allow(dead_code)]
@@ -80,24 +90,6 @@ impl ChunkVecBuffer {
         let take = self.apply_limit(bytes.len());
         self.append(bytes[..take].to_vec());
         take
-    }
-
-    /// Take and append the given `bytes`.
-    pub fn append(&mut self, bytes: Vec<u8>) -> usize {
-        let len = bytes.len();
-
-        if !bytes.is_empty() {
-            self.chunks.push_back(bytes);
-        }
-
-        len
-    }
-
-    /// Take one of the chunks from this object.  This
-    /// function panics if the object `is_empty`.
-    #[allow(dead_code)]
-    pub fn pop(&mut self) -> Option<Vec<u8>> {
-        self.chunks.pop_front()
     }
 
     /// Read data out of this object, writing it into `buf`
@@ -117,9 +109,9 @@ impl ChunkVecBuffer {
     }
 
     fn consume(&mut self, mut used: usize) {
-        while let Some(mut buf) = self.chunks.pop_front() {
+        while let Some(mut buf) = self.pop() {
             if used < buf.len() {
-                self.chunks.push_front(buf.split_off(used));
+                self.insert_front(buf.split_off(used));
                 break;
             } else {
                 used -= buf.len();
@@ -128,6 +120,7 @@ impl ChunkVecBuffer {
     }
 
     /// Read data out of this object, passing it `wr`
+    #[allow(dead_code)]
     pub fn write_to(&mut self, wr: &mut dyn io::Write) -> io::Result<usize> {
         if self.is_empty() {
             return Ok(0);
@@ -141,6 +134,63 @@ impl ChunkVecBuffer {
         let used = wr.write_vectored(&bufs[..len])?;
         self.consume(used);
         Ok(used)
+    }
+}
+
+impl<T: Deref<Target = [u8]>> ChunkVecBuffer<T> {
+    /// Take and append the given `bytes`.
+    pub fn append(&mut self, bytes: T) -> usize {
+        let len = bytes.len();
+
+        if !bytes.is_empty() {
+            self.chunks.push_back(bytes);
+        }
+
+        len
+    }
+
+    /// Take and insert the given `bytes` at the start of the queue.
+    pub fn insert_front(&mut self, bytes: T) -> usize {
+        let len = bytes.len();
+
+        if !bytes.is_empty() {
+            self.chunks.push_front(bytes);
+        }
+
+        len
+    }
+}
+
+impl<T: Deref<Target = [u8]> + Buf> Buf for ChunkVecBuffer<T> {
+    fn remaining(&self) -> usize {
+        self.len()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.chunks
+            .front()
+            .map(|x| x.deref())
+            .unwrap_or_else(|| [0u8; 0].as_slice())
+    }
+
+    fn advance(&mut self, mut cnt: usize) {
+        while cnt > 0 {
+            let len = self.chunks.front().unwrap().len();
+            if len < cnt {
+                self.chunks.pop_front();
+                cnt -= len;
+            } else {
+                let front = self.chunks.front_mut().unwrap();
+                front.advance(cnt);
+                break;
+            }
+        }
+    }
+}
+
+impl<T: Deref<Target = [u8]>> Default for ChunkVecBuffer<T> {
+    fn default() -> Self {
+        ChunkVecBuffer::new()
     }
 }
 

@@ -10,17 +10,26 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-thiserror = "1.0.24"
-log = "0.4.14"
-protobuf = { version = "2.22.1", features = ["with-bytes"] }
-bytes = "1.0.1"
-byteorder = "1.4.3"
-futures = "0.3.14"
-tokio = {version = "1.5.0", features = ["full"]}
+tinyvec = "1.6"
+thiserror = "1.0"
+log = "0.4"
+protobuf = { version = "2.27.1", features = ["with-bytes"] }
+bytes = "1.1"
+futures = "0.3"
+async-trait = "0.1.57"
+tokio = {version = "1.17", features = ["full"] }
+openssl = "0.10.41"
 
 [build-dependencies]
-protoc-rust = "2.8.1"
+protoc-rust = "2.27.1"
 
 [dev-dependencies]
-env_logger = "0.8.3"
-tokio-test = "0.4.1"
+env_logger = "0.9.0"
+tokio-test = "0.4.2"
+rand = "^0.8.5"
+criterion = "0.3"
+lazy_static = "1.4.0"
+
+[[bench]]
+name = "tokio_idscp_connection"
+harness = false

@@ -7,4 +7,4 @@
 The asynchronous implementation of the IDSCP2 protocol in Rust.
 
 # Notes
-For returning a List of Actions from the FSM's `process_event()` method: encode them as bitflags: https://docs.rs/bitflags/1.2.1/bitflags/#methods-1
+Make sure the APIs follow the Rust Guidelines: https://rust-lang.github.io/api-guidelines/checklist.html
