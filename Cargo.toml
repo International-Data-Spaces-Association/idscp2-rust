@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "idscp2_default_drivers",
     "idscp2_core",
     "idscp2_tests",
 ]
