@@ -21,7 +21,7 @@ enum ProtocolState {
 }
 
 pub(crate) enum FsmAction {
-    None, // TODO we use this to implement a meaningless Default for the safe ArrayVec
+    None, // we use this to implement a meaningless Default for the safe ArrayVec
     SecureChannelAction(SecureChannelAction),
     NotifyUserData(Bytes),
     SetDatTimeout(Duration),
@@ -734,7 +734,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 actions
             }
 
-            // Unknown message
+            // Ignore messages in any remaining states
             (
                 _,                                                           // FSM state
                 _,                                                           // Prover state
@@ -749,8 +749,11 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 ArrayVec::default()
             }
 
+            // All other states should not be possible under the IDSCP2 specification.
+            // The FSM is private and can only be accessed via IdscpConnection.
+            // We guarantee that the IdscpConnection only enters valid FSM states.
             (state, prover, verifier, dat, dat_timeout, ra_timeout, resend_timeout, event) => {
-                unimplemented!(
+                panic!(
                     "\n(\
                 state: {:?},\n\
                 prover: {:?},\n\
@@ -761,14 +764,7 @@ impl<'daps, 'config> Fsm<'daps, 'config> {
                 resend_timeout: {:?},\n\
                 event: {:?},\n\
                 )",
-                    state,
-                    prover,
-                    verifier,
-                    dat,
-                    dat_timeout,
-                    ra_timeout,
-                    resend_timeout,
-                    event
+                    state, prover, verifier, dat, dat_timeout, ra_timeout, resend_timeout, event
                 )
             }
         }
