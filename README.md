@@ -1,10 +1,39 @@
+The IDSCP2 Rust implementation
+================================
+The Rust implementation of the IDSCP2 transport layer.  
 
-![Tests](https://github.com/obraunsdorf/async-idscp2/actions/workflows/ci.yml/badge.svg?branch=master)
-[![Coverage Status](https://coveralls.io/repos/github/obraunsdorf/async-idscp2/badge.svg?branch=master)](https://coveralls.io/github/obraunsdorf/async-idscp2?branch=master)
+The IDSCP protocol establishes a secure peer-to-peer connection that provides **mutual remote attestation** and guarantees 
+confidentiality, integrity, authenticity and perfect forward secrecy.
+It is designed to be very modular and thus flexible regarding the underlying communication channels and mechanisms for
+remote attestation.
 
-# Async-Idscp2
 
-The asynchronous implementation of the IDSCP2 protocol in Rust.
+## Disclaimer
+The IDSCP2 transport layer protocol and its Rust implementation is still in early stages of development and **should
+not be used in production**.
 
-# Notes
-Make sure the APIs follow the Rust Guidelines: https://rust-lang.github.io/api-guidelines/checklist.html
+## Asynchronous Version vs Multithreaded version
+This branch provides the asynchronous Rust implementation. It is more efficient in runtime and memory but **more experimental** than the multithreaded version.
+See the respective branch for the multithreaded version.
+
+## Building
+
+Install the latest stable release of the rust toolchain (it is recommended to install it via https://rustup.rs/).
+
+Install Linux dependencies
+```
+apt install libssl-dev protobuf-compiler 
+```
+
+In the root directory run
+ - `cargo build` to download dependencies and build the library
+ - `cargo test -- --nocapture` to run the tests
+ - `RUST_LOG=debug cargo test -- --nocapture` to see log output of the idscp library (for more log configuration options see https://docs.rs/crate/env_logger)
+
+
+
+
+## Remote Attestation
+Fraunhofer AISEC is developing multiple "drivers" for different remote attestation mechanisms (based on TPM, 
+Intel SGX, AMD SEV) which are currently not licensed as open source. If you want to use our implementations, please get
+in touch.
