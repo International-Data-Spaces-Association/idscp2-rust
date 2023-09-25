@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ master, jacobsen/fsm_allow_one_side_attested ]
+    branches: [ master, async, multithreaded ]
   pull_request:
-    branches: [ master ]
+    branches: [ master, async, multithreaded ]
   schedule:
     - cron: '0 0 1 * *' # trigger monthly
 
@@ -22,7 +22,7 @@ jobs:
           - stable
           - nightly
           - beta
-          - 1.63.0 # Minimum supported rust version
+          - 1.70.0 # Minimum supported rust version
     steps:
       - uses: actions/checkout@v2
 
